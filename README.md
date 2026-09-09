@@ -19,7 +19,7 @@
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
 | 测试 | 数学 / std140 / 格式表 / 几何生成 + **Mock 后端全流程集成测试**（`node --test`） |
-| 示例 | 4 个可运行示例（同一源码切 WebGL2 / WebGPU 验证） |
+| 示例 | 7 个可运行示例（同一源码切 WebGL2 / WebGPU），含 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -38,6 +38,20 @@ npm run serve          # 本地静态服务 → http://localhost:8080/
 
 打开 http://localhost:8080/ 后选择任意示例。默认 **WebGPU 优先，WebGL2 兜底**；
 用 URL 参数强制后端：`?backend=webgl2` / `?backend=webgpu`。
+
+### 性能示例
+
+三个性能示例会自动循环各档位测量（`examples/common/bench.ts` 提供的统一测量框架）：
+
+| 示例 | 测量什么 | 档位 |
+| --- | --- | --- |
+| `perf-drawcalls` | 每物体一次 draw 的 CPU 开销（含 UBO 提交与绑定） | 500 → 6000 个立方体 |
+| `perf-instanced` | 单 draw 内实例化吞吐（顶点/光栅压力） | 4 096 → 262 144 个实例 |
+| `perf-triangles` | 高细分网格的三角形吞吐 | 32×16 → 224×112 细分 ×4 份 |
+
+- 每档先预热 12 帧，再取 90 帧窗口平均，右上角逐档显示 ms / fps；
+- 点击档位可手动停留，**空格**暂停/继续自动循环；
+- 渲染分辨率固定为 CSS 像素（可 `?scale=2`），保证不同档位可比。
 
 ### 一个最小例子（与后端无关）
 

@@ -4,3 +4,5 @@ dist-examples/
 *.tsbuildinfo
 .DS_Store
 *.log
+
+shot-*.png

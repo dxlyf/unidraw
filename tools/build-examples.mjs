@@ -15,6 +15,9 @@ const demos = [
   { name: "shapes", title: "形状 · 多几何体/深度/轨道相机" },
   { name: "textures", title: "纹理 · 采样/寻址" },
   { name: "instancing", title: "实例化 · 自定义着色器 + instance 顶点流" },
+  { name: "perf-drawcalls", title: "性能 · draw call 压力（500→6000 draws）" },
+  { name: "perf-instanced", title: "性能 · 实例化压力（4k→262k）" },
+  { name: "perf-triangles", title: "性能 · 三角形吞吐" },
 ];
 
 for (const demo of demos) {
@@ -59,7 +62,8 @@ small{color:#6b7185}</style></head>
 <ul>
 ${links}
 </ul>
-<small>需要 WebGPU 或 WebGL2 支持；WebGPU 优先，可 ?backend= 强制。构建：npm run build:examples · 本地预览：npm run serve</small>
+<small>需要 WebGPU 或 WebGL2 支持；WebGPU 优先，可 ?backend= 强制。构建：npm run build:examples · 本地预览：npm run serve。<br/>
+性能示例会自动循环各档位（每档约 3s 测量窗口帧耗时，预热 12 帧）；点击档位可手动停留，空格暂停/继续。</small>
 </body></html>
 `,
 );
