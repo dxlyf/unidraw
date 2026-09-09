@@ -64,6 +64,13 @@ export interface SamplerDescriptor {
   minFilter?: "nearest" | "linear";
   mipmapFilter?: "nearest" | "linear";
   maxAnisotropy?: number;
+  /**
+   * 是否启用 mipmap 过滤。缺省 false（只使用 base level）。
+   * 注意（WebGL2）：minFilter 组合 mip 变体（如 LINEAR_MIPMAP_LINEAR）时，
+   * 纹理必须拥有完整 mip 链（mipLevelCount>1 且已生成），否则属于“不完整纹理”，
+   * 采样结果为未定义（常见发灰/黑）。开启本项请同时使用可 mip 的纹理。
+   */
+  mips?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +260,7 @@ export function defaultSamplerDescriptor(): SamplerDescriptor {
     minFilter: "linear",
     mipmapFilter: "linear",
     maxAnisotropy: 1,
+    mips: false,
   };
 }
 

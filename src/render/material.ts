@@ -233,6 +233,8 @@ export interface TextureMaterialOptions extends MaterialOptions {
     magFilter?: "nearest" | "linear";
     minFilter?: "nearest" | "linear";
     mipmapFilter?: "nearest" | "linear";
+    /** 启用 mipmap 过滤（需要纹理生成完整 mip 链）；默认 false */
+    mips?: boolean;
   };
 }
 
@@ -263,6 +265,7 @@ export class TextureMaterial extends BaseMaterial {
       magFilter: s.magFilter ?? "linear",
       minFilter: s.minFilter ?? "linear",
       mipmapFilter: s.mipmapFilter ?? "nearest",
+      mips: s.mips ?? false,
     });
     // 缺省用 1x1 白色占位纹理（纯色 tint），保证 bind group 覆盖全部 binding
     this._texture = TextureMaterial.createPlaceholderTexture(device, opts.label ? `${opts.label}-placeholder` : "texture-placeholder");

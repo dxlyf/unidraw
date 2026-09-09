@@ -60,28 +60,36 @@ export function decodePng(file) {
   return { width: w, height: h, channels, data: out };
 }
 
-const file = process.argv[2];
-const { width, height, channels, data } = decodePng(file);
-// 统计：全图非背景像素占比 + 中心区域亮度
-function sample(cx, cy, rw, rh) {
-  let minL = 255;
-  let maxL = 0;
-  let count = 0;
-  let acc = 0;
-  for (let y = cy; y < cy + rh; y++) {
-    for (let x = cx; x < cx + rw; x++) {
-      const i = (y * width + x) * channels;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      if (r + g + b > 40) count++;
-      acc += l;
-      minL = Math.min(minL, l);
-      maxL = Math.max(maxL, l);
+export function probeCenter(file) {
+  const { width, height, channels, data } = decodePng(file);
+  const sample = (cx, cy, rw, rh) => {
+    let minL = 255;
+    let maxL = 0;
+    let count = 0;
+    let acc = 0;
+    let satSum = 0;
+    for (let y = cy; y < cy + rh; y++) {
+      for (let x = cx; x < cx + rw; x++) {
+        const i = (y * width + x) * channels;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (r + g + b > 40) count++;
+        const mx = Math.max(r, g, b);
+        const mn = Math.min(r, g, b);
+        satSum += mx === 0 ? 0 : (mx - mn) / mx;
+        acc += l;
+        minL = Math.min(minL, l);
+        maxL = Math.max(maxL, l);
+      }
     }
-  }
-  return { bright: count, total: rw * rh, mean: acc / (rw * rh), min: minL, max: maxL };
+    return { bright: count, total: rw * rh, mean: acc / (rw * rh), min: minL, max: maxL, satMean: satSum / (rw * rh) };
+  };
+  return sample(Math.floor(width * 0.3), Math.floor(height * 0.25), Math.floor(width * 0.4), Math.floor(height * 0.5));
 }
-const c = sample(Math.floor(width * 0.3), Math.floor(height * 0.3), Math.floor(width * 0.4), Math.floor(height * 0.4));
-console.log(JSON.stringify({ width, height, channels, center: c }, null, 1));
+
+if (process.argv[1] && import.meta.url.replace(/\\/g, "/").endsWith(process.argv[1].replace(/\\/g, "/"))) {
+  console.log(JSON.stringify({ probe: probeCenter(process.argv[2]) }, null, 1));
+}
+

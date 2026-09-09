@@ -57,11 +57,16 @@ bootDemo({
     ballMesh.model.setIdentity().translate(3.2, 0.6, 0);
 
     let t = 0;
+    const freeze = new URLSearchParams(location.search).get("freeze") !== null;
     return {
       frame(pass, ctx2) {
-        t += ctx2.dt;
+        if (!freeze) {
+          t += ctx2.dt;
+          ctx2.camera.yaw += ctx2.dt * 0.1;
+        } else {
+          t = 1.8;
+        }
         const cam = ctx2.camera;
-        cam.yaw += ctx2.dt * 0.1;
         cam.update();
         const vp = cam.viewProjection;
 
