@@ -64,6 +64,20 @@ frame();
 
 > 同一段代码在 WebGL2 与 WebGPU 下给出相同画面 —— 这就是“统一绘制命令”。
 
+### 故障排查
+
+- WebGPU 渲染为空时优先看控制台：框架会**无条件打印** WGSL 编译诊断
+  （`[unidraw] WGSL 编译诊断`）与校验错误（`[unidraw] WebGPU validation error`）。
+- 常见陷阱：渲染通道带**深度附件**时，参与该 pass 的每条管线都必须声明匹配的
+  `depthStencil`（WebGPU 校验规则）。纯 2D 绘制请关闭深度：
+  `new Renderer(canvas, { depth: false })`，或在 URL 后加 `?depth=0` 对比。
+- 无头验证（无需真实显示器/GPU，SwiftShader）：
+  ```bash
+  EXTRA_CHROME_FLAGS=--enable-unsafe-swiftshader \
+    node tools/browser-probe.mjs "http://localhost:8080/triangle/index.html?backend=webgpu" wgpu
+  node tools/pngprobe.mjs shot-wgpu.png   # 像素统计
+  ```
+
 ---
 
 ## 目录结构

@@ -26,6 +26,15 @@ export interface DemoHooks {
   run(ctx: DemoContext): { frame(pass: RenderPassEncoder, ctx: DemoContext): void };
 }
 
+export interface DemoOptions {
+  /**
+   * 帧缓冲是否带深度附件（默认 true）。
+   * 注意（WebGPU 语义）：pass 带深度附件时，参与绘制的管线都必须声明
+   * 匹配的 depthStencil；纯 2D 示例请设 false。
+   */
+  depth?: boolean;
+}
+
 function backendFromUrl(): string {
   try {
     const v = new URLSearchParams(location.search).get("backend");
@@ -34,6 +43,16 @@ function backendFromUrl(): string {
     /* ignore */
   }
   return "auto";
+}
+
+function depthFromUrl(): boolean {
+  try {
+    const v = new URLSearchParams(location.search).get("depth");
+    if (v === "0" || v === "false") return false;
+  } catch {
+    /* ignore */
+  }
+  return true;
 }
 
 export function attachOrbitControls(camera: Camera, canvas: HTMLCanvasElement): { dispose(): void } {
@@ -81,7 +100,7 @@ export function attachOrbitControls(camera: Camera, canvas: HTMLCanvasElement): 
   };
 }
 
-export async function bootDemo(hooks: DemoHooks): Promise<DemoContext> {
+export async function bootDemo(hooks: DemoHooks, options: DemoOptions = {}): Promise<DemoContext> {
   const canvas = document.createElement("canvas");
   canvas.id = "canvas";
   document.body.appendChild(canvas);
@@ -115,10 +134,35 @@ export async function bootDemo(hooks: DemoHooks): Promise<DemoContext> {
   window.addEventListener("error", (e) => {
     errEl.textContent = `[error] ${e.message}`;
   });
+  window.addEventListener("unhandledrejection", (e) => {
+    errEl.textContent = `[promise] ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`;
+  });
 
-  const renderer = await Renderer.create(canvas, { backend: backendFromUrl() as "auto" | "webgpu" | "webgl2" | "mock" });
+  const depthRequested = options.depth ?? true;
+  const renderer = await Renderer.create(canvas, {
+    backend: backendFromUrl() as "auto" | "webgpu" | "webgl2" | "mock",
+    depth: depthFromUrl() && depthRequested,
+  });
   backendEl.textContent = renderer.device.kind;
   backendEl.textContent += " · " + renderer.device.info.name;
+  if (renderer.device.kind === "webgpu") {
+    hint.textContent = "WebGPU 后端：渲染为空时请查看控制台（已打印 WGSL 编译诊断/校验错误）· 拖拽旋转 · ?backend=webgl2 可对比";
+  }
+
+  // 自动化探针钩子（无副作用）
+  let probeFrames = 0;
+  (globalThis as Record<string, unknown>).__unidraw = {
+    get status() {
+      return {
+        backend: renderer.device.kind,
+        name: renderer.device.info.name,
+        err: errEl.textContent ?? "",
+        fps: fpsEl.textContent,
+        size: [canvas.width, canvas.height],
+        frames: probeFrames,
+      };
+    },
+  };
 
   const camera = new Camera();
   camera.setPerspective(degToRad(60), 1, 0.1, 200);
@@ -152,26 +196,31 @@ export async function bootDemo(hooks: DemoHooks): Promise<DemoContext> {
     if (disposed) return;
     const dt = Math.min((now - prev) / 1000, 0.1);
     prev = now;
-    const changed = renderer.resizeToDisplaySize(2);
-    if (changed) {
-      canvas.width = canvas.width;
-      camera.aspect = canvas.width / Math.max(1, canvas.height);
-      camera.update();
-    }
-    ctx.time = now / 1000;
-    ctx.dt = dt;
-    ctx.width = canvas.width;
-    ctx.height = canvas.height;
-
-    const pass = renderer.beginFrame();
     try {
-      frameFn?.(pass, ctx);
+      const changed = renderer.resizeToDisplaySize(2);
+      if (changed) {
+        camera.aspect = canvas.width / Math.max(1, canvas.height);
+        camera.update();
+      }
+      ctx.time = now / 1000;
+      ctx.dt = dt;
+      ctx.width = canvas.width;
+      ctx.height = canvas.height;
+
+      const pass = renderer.beginFrame();
+      try {
+        frameFn?.(pass, ctx);
+      } catch (e) {
+        errEl.textContent = e instanceof Error ? e.stack ?? e.message : String(e);
+      }
+      renderer.endFrame();
     } catch (e) {
+      // 任何一帧崩溃都不中断动画循环，便于看到持续错误信息
       errEl.textContent = e instanceof Error ? e.stack ?? e.message : String(e);
     }
-    renderer.endFrame();
 
     frames++;
+    probeFrames++;
     if (now - lastFpsTime >= 500) {
       fpsEl.textContent = `fps: ${Math.round((frames * 1000) / (now - lastFpsTime))}`;
       frames = 0;

@@ -77,7 +77,8 @@ fn vs_main(in : VSIn) -> VSOut {
   var out : VSOut;
   let world = model.u_model * vec4f(in.a_position, 1.0);
   out.v_worldPos = world.xyz;
-  out.v_normal = normalize(mat3x3f(model.u_model) * in.a_normal);
+  // 法线用 w=0 的向量乘 mat4，避免依赖“矩阵截断构造”这类各实现不一致的写法
+  out.v_normal = normalize((model.u_model * vec4f(in.a_normal, 0.0)).xyz);
   out.v_uv = in.a_uv;
   out.clip_pos = camera.u_viewProj * world;
   return out;

@@ -22,7 +22,6 @@ import type {
   TextureUploadOptions,
 } from "../../descriptors.js";
 import { assert, UnidrawError } from "../../../util/assert.js";
-import { logger } from "../../../util/logger.js";
 import type { CommandBuffer } from "../../../command/encoder.js";
 import type { CommandOp, DepthStencilAttachmentOp } from "../../../command/ops.js";
 import type { ColorClearValue, TextureFormat } from "../../../gpu/types.js";
@@ -197,6 +196,16 @@ class WebGPUProgram extends Program {
     this.fragmentEntryPoint = desc.wgsl.fragmentEntryPoint ?? "fs_main";
     this.gpuModule = device.gpu.createShaderModule({ label: desc.label, code: desc.wgsl.code });
     device.register(this);
+    // 异步取回编译诊断（不阻塞创建，出错时尽快打印到控制台）
+    this.gpuModule
+      .getCompilationInfo()
+      .then((info) => {
+        if (info.messages.length > 0) {
+          const lines = info.messages.map((m) => `  [${m.type}] ${m.message} (${m.lineNum ?? "?"}:${m.linePos ?? "?"})`);
+          console.error(`[unidraw] WGSL 编译诊断 "${desc.label ?? "program"}":\n${lines.join("\n")}`);
+        }
+      })
+      .catch(() => {});
   }
 
   protected destroyNative(): void {}
@@ -364,11 +373,13 @@ export class WebGPUDevice extends Device {
     assert(ctx, "无法获取 webgpu canvas context");
     this.context = ctx;
     this.configureContext();
-    gpu.lost.then((info) => logger.warn(`WebGPU device lost: ${info.reason ?? "unknown"}`));
-    // 便于排查校验错误
+    // WebGPU 校验错误异步上报：始终打印，便于无需开日志即可排查
     gpu.addEventListener("uncapturederror", (e: Event) => {
       const ev = e as GPUUncapturedErrorEvent;
-      logger.error("WebGPU uncaptured error:", ev.error.message);
+      console.error(`[unidraw] WebGPU validation error: ${ev.error?.message ?? "unknown"}`);
+    });
+    gpu.lost.then((info) => {
+      console.error(`[unidraw] WebGPU device lost: ${info.reason ?? "unknown"}`);
     });
   }
 

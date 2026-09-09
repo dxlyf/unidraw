@@ -13,6 +13,7 @@ import type { BindGroup, BindGroupLayout, Program, RenderPipeline, Texture } fro
 import { type Sampler } from "../device/resources.js";
 import type { VertexStateDescriptor } from "../device/descriptors.js";
 import type { TextureFormat } from "../gpu/types.js";
+import { TextureUsage } from "../gpu/types.js";
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { Color } from "../math/color.js";
 import type { Vec3 } from "../math/vec3.js";
@@ -98,7 +99,8 @@ export abstract class BaseMaterial {
   protected readonly cameraBlock: UniformBlock;
   protected readonly modelBlock: UniformBlock;
   protected readonly materialBlock: UniformBlock;
-  protected bindGroup: BindGroup;
+  /** 由子类在所有资源就绪后通过 assembleBindGroup() 建立 */
+  protected bindGroup!: BindGroup;
   private _lastPass: RenderPassEncoder | null = null;
 
   protected constructor(device: Device, program: Program, opts: MaterialOptions, extraLayoutEntries: { binding: number; type: "uniform-buffer" | "texture" | "sampler"; visibility: number; name?: string }[] = []) {
@@ -124,11 +126,18 @@ export abstract class BaseMaterial {
     this.cameraBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-camera` : "camera", fields: CAMERA_FIELDS });
     this.modelBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-model` : "model", fields: MODEL_FIELDS });
     this.materialBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-material` : "material", fields: MATERIAL_FIELDS });
-    this.bindGroup = this.createBindGroup();
   }
 
   /** 由子类提供 group 资源（含额外 texture/sampler）。 */
   protected abstract createBindGroup(): BindGroup;
+
+  /**
+   * 建立 bind group。必须在子类自己的资源（颜色/纹理/采样器）就绪后调用，
+   * 因为 WebGPU 的 BindGroup 必须覆盖 layout 声明的全部 binding。
+   */
+  protected assembleBindGroup(): void {
+    this.bindGroup = this.createBindGroup();
+  }
 
   protected layoutOf(): BindGroupLayout {
     return this.layout;
@@ -185,6 +194,7 @@ export class ColorMaterial extends BaseMaterial {
     super(device, program, opts);
     this._color = color.clone();
     this.flushColor();
+    this.assembleBindGroup();
   }
 
   private flushColor(): void {
@@ -231,7 +241,7 @@ export interface TextureMaterialOptions extends MaterialOptions {
  * 布局额外包含 binding 3（u_albedo）与 binding 4（u_albedoSampler）。
  */
 export class TextureMaterial extends BaseMaterial {
-  private _texture: Texture | null = null;
+  private _texture: Texture;
   private readonly _sampler: Sampler;
   private readonly _color: Color;
 
@@ -254,10 +264,17 @@ export class TextureMaterial extends BaseMaterial {
       minFilter: s.minFilter ?? "linear",
       mipmapFilter: s.mipmapFilter ?? "nearest",
     });
+    // 缺省用 1x1 白色占位纹理（纯色 tint），保证 bind group 覆盖全部 binding
+    this._texture = TextureMaterial.createPlaceholderTexture(device, opts.label ? `${opts.label}-placeholder` : "texture-placeholder");
     this._color = color.clone();
     this.flushColor();
-    // 占位 BindGroup：无纹理时仅绑定 UBO（纹理绑定 3/4 缺省跳过）
-    this.bindGroup = this.createBindGroup();
+    this.assembleBindGroup();
+  }
+
+  private static createPlaceholderTexture(device: Device, label: string): Texture {
+    const t = device.createTexture({ label, width: 1, height: 1, format: "rgba8unorm", usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST });
+    t.upload(new Uint8Array([255, 255, 255, 255]));
+    return t;
   }
 
   private flushColor(): void {
@@ -278,28 +295,25 @@ export class TextureMaterial extends BaseMaterial {
   /** 绑定纹理（会重建 BindGroup）。 */
   setTexture(texture: Texture): this {
     this._texture = texture;
-    this.bindGroup = this.createBindGroup();
+    this.assembleBindGroup();
     return this;
   }
 
-  get texture(): Texture | null {
+  get texture(): Texture {
     return this._texture;
   }
 
   protected override createBindGroup(): BindGroup {
-    const entries: { binding: number; resource: unknown }[] = [
-      { binding: 0, resource: this.cameraBlock.buffer },
-      { binding: 1, resource: this.modelBlock.buffer },
-      { binding: 2, resource: this.materialBlock.buffer },
-    ];
-    if (this._texture) {
-      entries.push({ binding: 3, resource: this._texture.view() });
-      entries.push({ binding: 4, resource: this._sampler });
-    }
     return this.device.createBindGroup({
       label: "texturematerial-group",
       layout: this.layout,
-      entries: entries as { binding: number; resource: import("../device/descriptors.js").BindGroupResource }[],
+      entries: [
+        { binding: 0, resource: this.cameraBlock.buffer },
+        { binding: 1, resource: this.modelBlock.buffer },
+        { binding: 2, resource: this.materialBlock.buffer },
+        { binding: 3, resource: this._texture.view() },
+        { binding: 4, resource: this._sampler },
+      ],
     });
   }
 }
