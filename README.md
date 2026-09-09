@@ -15,11 +15,11 @@
 | 统一资源与命令 | `Buffer / Texture / Sampler / Program / RenderPipeline / BindGroup` 与 `beginRenderPass → setPipeline → setBindGroup → draw…` 全部与后端无关 |
 | 三种后端 | **WebGL2**（完整实现）、**WebGPU**（完整实现）、**Mock**（无头 CPU 后端，Node 单测用） |
 | 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包 |
-| 内置材质 | `ColorMaterial` / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现 |
-| 内置几何 | box / plane / sphere / triangle / fullscreenTriangle |
+| 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
+| 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule** |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
 | 测试 | 数学 / std140 / 格式表 / 几何生成 + **Mock 后端全流程集成测试**（`node --test`） |
-| 示例 | 8 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**示例与 3 个**性能档位循环**示例 |
+| 示例 | 9 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -58,6 +58,18 @@ WebGL2 / WebGPU 共用一套实现：
 
 `examples/shapes2d` 展示了上述全部能力（含动画与裁剪层叠）。
 模块用法与边界见 [docs/render2d.md](docs/render2d.md)。
+
+### 3D 材质与几何
+
+框架内置更多 3D 素材（`src/render/`）：
+
+- **材质**：`ColorMaterial`（Lambert 漫反射）、`UnlitColorMaterial`（无光照纯色）、
+  `PhongMaterial`（Blinn-Phong 高光：`shininess / specular / ambient` 参数，
+  需要传入相机位置）、`TextureMaterial`（纹理 × Lambert）；统一支持
+  `alphaBlend` 半透明与双面（`cullMode`）；
+- **几何**：`cylinder`（上下半径可不同=圆台，可封口/开口）、`cone`、`torus`、
+  `capsule`，全部带正确 UV/法线与朝外绕序（内置自检工具修正）；
+- 示例 `examples/shapes3d` 以画廊形式展示几何 × 材质组合并旋转。
 
 ### 性能示例
 
@@ -128,7 +140,7 @@ src/
   render2d/    Canvas2D 完整 2D：路径/贝塞尔/arc/圆角矩形、填充描边、渐变、
                变换、文本、裁剪（WebGL2/WebGPU 共用）
   __tests__    node --test 测试
-examples/      8 个示例 + common/（demo 引导、bench 测量框架）
+examples/      9 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```

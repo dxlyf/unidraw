@@ -27,8 +27,12 @@ import { Mesh } from "./Mesh.js";
 import {
   COLOR_FRAGMENT_GLSL,
   COLOR_FRAGMENT_WGSL,
+  PHONG_FRAGMENT_GLSL,
+  PHONG_FRAGMENT_WGSL,
   TEXTURE_FRAGMENT_GLSL,
   TEXTURE_FRAGMENT_WGSL,
+  UNLIT_FRAGMENT_GLSL,
+  UNLIT_FRAGMENT_WGSL,
   VERTEX_GLSL,
   VERTEX_WGSL,
 } from "./shaders.js";
@@ -42,7 +46,11 @@ export const CAMERA_FIELDS: UniformField[] = [
   { name: "u_cameraPos", type: "vec4" },
 ];
 export const MODEL_FIELDS: UniformField[] = [{ name: "u_model", type: "mat4" }];
-export const MATERIAL_FIELDS: UniformField[] = [{ name: "u_color", type: "vec4" }];
+/** u_color + u_params(x=shininess, y=spec 强度, z=ambient, w=保留) */
+export const MATERIAL_FIELDS: UniformField[] = [
+  { name: "u_color", type: "vec4" },
+  { name: "u_params", type: "vec4" },
+];
 
 export const STANDARD_VERTEX_STATE: VertexStateDescriptor = {
   buffers: [
@@ -69,7 +77,16 @@ export interface MaterialOptions {
   cullMode?: "none" | "front" | "back";
   /** 与深度附件匹配的深度格式（默认 depth24plus） */
   depthFormat?: TextureFormat;
+  /** 启用标准 alpha 混合（半透明） */
+  alphaBlend?: boolean;
   label?: string;
+}
+
+function defaultBlendState() {
+  return {
+    color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+    alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+  };
 }
 
 function depthFormatOf(_device: Device, opts: MaterialOptions): TextureFormat {
@@ -121,7 +138,7 @@ export abstract class BaseMaterial {
         depth === false
           ? null
           : { format: depthFormatOf(device, opts), depthWriteEnabled: true, depthCompare: "less-equal" },
-      targets: [{ format: targetFormat, writeMask: ColorWriteMask.ALL }],
+      targets: [{ format: targetFormat, writeMask: ColorWriteMask.ALL, blend: opts.alphaBlend ? defaultBlendState() : undefined }],
     });
     this.cameraBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-camera` : "camera", fields: CAMERA_FIELDS });
     this.modelBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-model` : "model", fields: MODEL_FIELDS });
@@ -148,6 +165,13 @@ export abstract class BaseMaterial {
     this.cameraBlock.setMat4("u_viewProj", viewProjection);
     this.cameraBlock.setVec4("u_cameraPos", cameraPos?.x ?? 0, cameraPos?.y ?? 0, cameraPos?.z ?? 0, 1);
     this.cameraBlock.flush();
+  }
+
+  /** 写 u_params：x=shininess、y=spec 强度、z=ambient、w=保留（按材质含义） */
+  setMaterialParams(x = 0, y = 0, z = 0, w = 0): this {
+    this.materialBlock.setVec4("u_params", x, y, z, w);
+    this.materialBlock.flush();
+    return this;
   }
 
   /** 绘制一个 mesh。 */
@@ -215,6 +239,133 @@ export class ColorMaterial extends BaseMaterial {
   protected override createBindGroup(): BindGroup {
     return this.device.createBindGroup({
       label: "colormaterial-group",
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: this.cameraBlock.buffer },
+        { binding: 1, resource: this.modelBlock.buffer },
+        { binding: 2, resource: this.materialBlock.buffer },
+      ],
+    });
+  }
+}
+
+/**
+ * 无光照纯色材质：颜色原样输出（2D 平涂 / 自发光 / UI 等）。
+ */
+export class UnlitColorMaterial extends BaseMaterial {
+  private readonly _color: Color;
+
+  constructor(device: Device, color: Color, opts: MaterialOptions = {}) {
+    const program = device.createProgram({
+      label: opts.label ?? "unidraw-unlit-program",
+      glsl: { vertex: VERTEX_GLSL, fragment: UNLIT_FRAGMENT_GLSL },
+      wgsl: { code: VERTEX_WGSL + UNLIT_FRAGMENT_WGSL },
+    });
+    super(device, program, opts);
+    this._color = color.clone();
+    this.flushColor();
+    this.assembleBindGroup();
+  }
+
+  private flushColor(): void {
+    this.materialBlock.setColor("u_color", this._color);
+    this.materialBlock.flush();
+  }
+
+  get color(): Color {
+    return this._color;
+  }
+
+  setColor(color: Color): this {
+    this._color.copy(color);
+    this.flushColor();
+    return this;
+  }
+
+  protected override createBindGroup(): BindGroup {
+    return this.device.createBindGroup({
+      label: "unlit-group",
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: this.cameraBlock.buffer },
+        { binding: 1, resource: this.modelBlock.buffer },
+        { binding: 2, resource: this.materialBlock.buffer },
+      ],
+    });
+  }
+}
+
+export interface PhongMaterialOptions extends MaterialOptions {
+  /** 高光指数（默认 48） */
+  shininess?: number;
+  /** 高光强度（默认 0.7） */
+  specular?: number;
+  /** 环境光系数（默认 0.18） */
+  ambient?: number;
+}
+
+/**
+ * Blinn-Phong 材质：diffuse + 镜面高光（白色高光）。绘制前请用
+ * `beginFrame(vp, camera.eyePosition)` 传入相机位置。
+ */
+export class PhongMaterial extends BaseMaterial {
+  private readonly _color: Color;
+  private shininess: number;
+  private specular: number;
+  private ambient: number;
+
+  constructor(device: Device, color: Color, opts: PhongMaterialOptions = {}) {
+    const program = device.createProgram({
+      label: opts.label ?? "unidraw-phong-program",
+      glsl: { vertex: VERTEX_GLSL, fragment: PHONG_FRAGMENT_GLSL },
+      wgsl: { code: VERTEX_WGSL + PHONG_FRAGMENT_WGSL },
+    });
+    super(device, program, opts);
+    this._color = color.clone();
+    this.shininess = opts.shininess ?? 48;
+    this.specular = opts.specular ?? 0.7;
+    this.ambient = opts.ambient ?? 0.18;
+    this.flushMaterial();
+    this.assembleBindGroup();
+  }
+
+  private flushMaterial(): void {
+    this.materialBlock.setColor("u_color", this._color);
+    this.materialBlock.setVec4("u_params", this.shininess, this.specular, this.ambient, 0);
+    this.materialBlock.flush();
+  }
+
+  get color(): Color {
+    return this._color;
+  }
+
+  setColor(color: Color): this {
+    this._color.copy(color);
+    this.flushMaterial();
+    return this;
+  }
+
+  setShininess(v: number): this {
+    this.shininess = Math.max(1, v);
+    this.flushMaterial();
+    return this;
+  }
+
+  setSpecular(v: number): this {
+    this.specular = Math.max(0, v);
+    this.flushMaterial();
+    return this;
+  }
+
+  setAmbient(v: number): this {
+    this.ambient = Math.max(0, Math.min(1, v));
+    this.flushMaterial();
+    return this;
+  }
+
+  protected override createBindGroup(): BindGroup {
+    return this.device.createBindGroup({
+      label: "phong-group",
       layout: this.layout,
       entries: [
         { binding: 0, resource: this.cameraBlock.buffer },

@@ -16,6 +16,7 @@ const demos = [
   { name: "textures", title: "纹理 · 采样/寻址" },
   { name: "instancing", title: "实例化 · 自定义着色器 + instance 顶点流" },
   { name: "shapes2d", title: "2D 绘制 · 矩形/线/圆/椭圆/多边形" },
+  { name: "shapes3d", title: "3D · 材质与几何画廊" },
   { name: "perf-drawcalls", title: "性能 · draw call 压力（500→6000 draws）" },
   { name: "perf-instanced", title: "性能 · 实例化压力（4k→262k）" },
   { name: "perf-triangles", title: "性能 · 三角形吞吐" },

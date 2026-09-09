@@ -7,10 +7,10 @@ import type { GeometryData } from "./Geometry.js";
 
 type Axis = "x" | "y" | "z";
 
-/**
- * 生成一个轴向面（立方体等使用）。
- * 通过叉积判定三角形绕序，保证从“外侧”看为逆时针（配合背面剔除/法线）。
- */
+// ---------------------------------------------------------------------------
+// 基础：轴向面 / 立方体
+// ---------------------------------------------------------------------------
+
 function quadFace(
   axis: Axis,
   sign: 1 | -1,
@@ -112,7 +112,9 @@ export function plane(width = 1, height = 1, segmentsX = 1, segmentsY = 1, tiles
       indices.push(at(r, c), at(r + 1, c), at(r + 1, c + 1), at(r, c), at(r + 1, c + 1), at(r, c + 1));
     }
   }
-  return { positions, normals, uvs, indices };
+  const data: GeometryData = { positions, normals, uvs, indices };
+  ensureOutwardWinding(data);
+  return data;
 }
 
 /** 球体。 */
@@ -168,4 +170,248 @@ export function fullscreenTriangle(): GeometryData {
     normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
     uvs: [0, 1, 2, 1, 0, -1],
   };
+}
+
+// ---------------------------------------------------------------------------
+// 通用：绕序修正（按“顶点法线朝外”翻转三角形）
+// ---------------------------------------------------------------------------
+
+function ensureOutwardWinding(data: GeometryData): void {
+  if (!data.indices) return;
+  const idx = data.indices as unknown as number[]; // 内部由生成器提供可变数组
+  const p = data.positions;
+  const n = data.normals ?? [];
+  for (let i = 0; i < idx.length; i += 3) {
+    const a = idx[i]! * 3;
+    const b = idx[i + 1]! * 3;
+    const c = idx[i + 2]! * 3;
+    const abx = p[b]! - p[a]!;
+    const aby = p[b + 1]! - p[a + 1]!;
+    const abz = p[b + 2]! - p[a + 2]!;
+    const acx = p[c]! - p[a]!;
+    const acy = p[c + 1]! - p[a + 1]!;
+    const acz = p[c + 2]! - p[a + 2]!;
+    let gx = aby * acz - abz * acy;
+    let gy = abz * acx - abx * acz;
+    let gz = abx * acy - aby * acx;
+    const gl = Math.hypot(gx, gy, gz);
+    if (gl < 1e-12) continue;
+    gx /= gl;
+    gy /= gl;
+    gz /= gl;
+    const nx = n[a]! + n[b]! + n[c]!;
+    const ny = n[a + 1]! + n[b + 1]! + n[c + 1]!;
+    const nz = n[a + 2]! + n[b + 2]! + n[c + 2]!;
+    const nl = Math.hypot(nx, ny, nz);
+    if (nl < 1e-12) continue;
+    if (gx * nx + gy * ny + gz * nz < 0) {
+      const tmp = idx[i + 1]!;
+      idx[i + 1] = idx[i + 2]!;
+      idx[i + 2] = tmp;
+    }
+  }
+}
+
+/** 相邻环带网格（供旋转体/管状体复用） */
+function lathe(
+  rows: { y: number; r: number; ny: number }[],
+  ws: number,
+  positions: number[],
+  normals: number[],
+  uvs: number[],
+  indices: number[],
+): void {
+  const rings: number[][] = rows.map(() => []);
+  rows.forEach((row, ri) => {
+    const lat = Math.asin(Math.max(-1, Math.min(1, row.ny)));
+    const cosLat = Math.cos(lat);
+    for (let col = 0; col <= ws; col++) {
+      const th = (col / ws) * Math.PI * 2;
+      const cos = Math.cos(th);
+      const sin = Math.sin(th);
+      positions.push(row.r * cos, row.y, row.r * sin);
+      normals.push(cosLat * cos, row.ny, cosLat * sin);
+      uvs.push(col / ws, ri / Math.max(1, rows.length - 1));
+      rings[ri]!.push(positions.length / 3 - 1);
+    }
+  });
+  for (let ri = 0; ri < rows.length - 1; ri++) {
+    for (let col = 0; col < ws; col++) {
+      const a = rings[ri]![col]!;
+      const b = rings[ri]![col + 1]!;
+      const c = rings[ri + 1]![col]!;
+      const d = rings[ri + 1]![col + 1]!;
+      indices.push(a, b, d, a, d, c);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 圆柱 / 圆台 / 圆锥（Y 轴，-height/2..height/2）
+// ---------------------------------------------------------------------------
+
+/** radiusTop=0 即圆锥；openEnded 可去掉上下盖。 */
+export function cylinder(radiusTop = 0.5, radiusBottom = 0.5, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false): GeometryData {
+  const ws = Math.max(3, radialSegments);
+  const hs = Math.max(1, heightSegments);
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  // 侧面生成：每行一个环带，法线含锥台斜率
+  const sidePos: number[] = [];
+  const sideNrm: number[] = [];
+  const sideUv: number[] = [];
+  const sideIdx: number[] = [];
+  const ringOf: number[][] = [];
+  for (let row = 0; row <= hs; row++) {
+    const t = row / hs;
+    const y = -height / 2 + height * t;
+    const r = radiusBottom + (radiusTop - radiusBottom) * t;
+    const drift = radiusTop - radiusBottom;
+    const ring: number[] = [];
+    for (let col = 0; col <= ws; col++) {
+      const th = (col / ws) * Math.PI * 2;
+      const cos = Math.cos(th);
+      const sin = Math.sin(th);
+      sidePos.push(r * cos, y, r * sin);
+      let nx = height * cos;
+      let ny = -drift;
+      let nz = height * sin;
+      const l = Math.hypot(nx, ny, nz);
+      if (l > 1e-9) {
+        nx /= l;
+        ny /= l;
+        nz /= l;
+      }
+      if (nx * cos + nz * sin < 0) {
+        nx = -nx;
+        ny = -ny;
+        nz = -nz;
+      }
+      sideNrm.push(nx, ny, nz);
+      sideUv.push(col / ws, row / hs);
+      ring.push(sidePos.length / 3 - 1);
+    }
+    ringOf.push(ring);
+  }
+  for (let row = 0; row < hs; row++) {
+    for (let col = 0; col < ws; col++) {
+      const a = ringOf[row]![col]!;
+      const b = ringOf[row]![col + 1]!;
+      const c = ringOf[row + 1]![col]!;
+      const d = ringOf[row + 1]![col + 1]!;
+      sideIdx.push(a, b, c, b, d, c);
+    }
+  }
+  positions.push(...sidePos);
+  normals.push(...sideNrm);
+  uvs.push(...sideUv);
+  indices.push(...sideIdx);
+
+  // 端盖
+  const addDisk = (y: number, radius: number, up: 1 | -1) => {
+    if (radius <= 1e-6) return;
+    const center = positions.length / 3;
+    positions.push(0, y, 0);
+    normals.push(0, up, 0);
+    uvs.push(0.5, 0.5);
+    const ringStart = positions.length / 3;
+    for (let col = 0; col < ws; col++) {
+      const th = (col / ws) * Math.PI * 2;
+      positions.push(radius * Math.cos(th), y, radius * Math.sin(th));
+      normals.push(0, up, 0);
+      uvs.push(0.5 + 0.5 * Math.cos(th), 0.5 + 0.5 * Math.sin(th));
+    }
+    for (let col = 0; col < ws; col++) {
+      const next = ringStart + ((col + 1) % ws);
+      if (up === 1) indices.push(center, ringStart + col, next);
+      else indices.push(center, next, ringStart + col);
+    }
+  };
+  if (!openEnded) {
+    addDisk(height / 2, radiusTop, 1);
+    addDisk(-height / 2, radiusBottom, -1);
+  }
+  const data: GeometryData = { positions, normals, uvs, indices };
+  ensureOutwardWinding(data);
+  return data;
+}
+
+/** 圆锥（顶点朝上 +Y） */
+export function cone(radius = 0.5, height = 1, radialSegments = 32): GeometryData {
+  return cylinder(0, radius, height, radialSegments, 1, false);
+}
+
+// ---------------------------------------------------------------------------
+// 圆环
+// ---------------------------------------------------------------------------
+
+export function torus(radius = 0.6, tube = 0.2, radialSegments = 32, tubularSegments = 16): GeometryData {
+  const ws = Math.max(3, radialSegments);
+  const ts = Math.max(3, tubularSegments);
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  for (let i = 0; i <= ws; i++) {
+    const u = (i / ws) * Math.PI * 2;
+    const cu = Math.cos(u);
+    const su = Math.sin(u);
+    for (let j = 0; j <= ts; j++) {
+      const v = (j / ts) * Math.PI * 2;
+      const cv = Math.cos(v);
+      const sv = Math.sin(v);
+      positions.push((radius + tube * cv) * cu, tube * sv, (radius + tube * cv) * su);
+      normals.push(cv * cu, sv, cv * su);
+      uvs.push(i / ws, j / ts);
+    }
+  }
+  const stride = ts + 1;
+  for (let i = 0; i < ws; i++) {
+    for (let j = 0; j < ts; j++) {
+      const a = i * stride + j;
+      const b = a + 1;
+      const c = (i + 1) * stride + j;
+      const d = c + 1;
+      indices.push(a, b, d, a, d, c);
+    }
+  }
+  const data: GeometryData = { positions, normals, uvs, indices };
+  ensureOutwardWinding(data);
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// 胶囊（沿 Y：柱段 middle + 两端半径 radius 的半球）
+// ---------------------------------------------------------------------------
+
+export function capsule(radius = 0.4, middle = 0.6, radialSegments = 24, capSegments = 8): GeometryData {
+  const ws = Math.max(3, radialSegments);
+  const cs = Math.max(1, capSegments);
+  const half = middle / 2;
+  // 从上到下：上顶(φ=π/2)→肩(0)、柱段、肩→下底(φ=-π/2)
+  const rows: { y: number; r: number; ny: number }[] = [];
+  for (let k = 0; k <= cs; k++) {
+    const phi = (Math.PI / 2) * (1 - k / cs);
+    rows.push({ y: half + radius * Math.sin(phi), r: radius * Math.cos(phi), ny: Math.sin(phi) });
+  }
+  const midRows = Math.max(1, cs);
+  for (let k = 1; k < midRows; k++) {
+    const t = k / midRows;
+    rows.push({ y: half - middle * t, r: radius, ny: 0 });
+  }
+  for (let k = 1; k <= cs; k++) {
+    const phi = (Math.PI / 2) * (k / cs);
+    rows.push({ y: -half - radius * Math.sin(phi), r: radius * Math.cos(phi), ny: -Math.sin(phi) });
+  }
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  lathe(rows, ws, positions, normals, uvs, indices);
+  const data: GeometryData = { positions, normals, uvs, indices };
+  ensureOutwardWinding(data);
+  return data;
 }
