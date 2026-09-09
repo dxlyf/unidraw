@@ -19,7 +19,7 @@
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
 | 测试 | 数学 / std140 / 格式表 / 几何生成 + **Mock 后端全流程集成测试**（`node --test`） |
-| 示例 | 7 个可运行示例（同一源码切 WebGL2 / WebGPU），含 3 个**性能档位循环**示例 |
+| 示例 | 8 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**示例与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -38,6 +38,16 @@ npm run serve          # 本地静态服务 → http://localhost:8080/
 
 打开 http://localhost:8080/ 后选择任意示例。默认 **WebGPU 优先，WebGL2 兜底**；
 用 URL 参数强制后端：`?backend=webgl2` / `?backend=webgpu`。
+
+### 2D 绘制示例
+
+`examples/shapes2d`：一个画布式的 2D 绘制示例（矩形 / 线 / 圆 / 椭圆 / 多边形，
+支持填充与描边、顶点色、alpha 混合、描边厚度）：
+
+- 坐标即像素（原点左上），通过正交投影矩阵（每帧随画布重建）映射到 NDC；
+- 自定义 2D 着色器（`position.xy + 顶点色`），图元在 CPU 侧三角化后合批为
+  **每帧一次 drawIndexed**（动态缓冲，便于动画）；
+- 包含动画：移动小矩形、轨道圆、半径可变的脉冲圆、旋转星形。
 
 ### 性能示例
 
@@ -106,7 +116,7 @@ src/
   render/      Geometry/primitives、UniformBlock、material（内置材质）、texture、
                Mesh、Camera、Renderer 门面、shaders（GLSL+WGSL）
   __tests__    node --test 测试
-examples/      4 个示例 + common/demo.ts 引导
+examples/      8 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
