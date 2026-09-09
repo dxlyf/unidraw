@@ -1,0 +1,39 @@
+export const version = "0.1.0";
+
+// ---- 数学 ----------------------------------------------------------------
+export * from "./math/index.js";
+
+// ---- 统一 GPU 类型 / 格式 / std140 ----------------------------------------
+export * from "./gpu/types.js";
+export * from "./gpu/formats.js";
+export * from "./gpu/std140.js";
+
+// ---- 设备与资源抽象 ---------------------------------------------------------
+export * from "./device/Device.js";
+export * from "./device/descriptors.js";
+export * from "./device/resources.js";
+export * from "./device/createDevice.js";
+
+// ---- 统一命令 ---------------------------------------------------------------
+export * from "./command/ops.js";
+export * from "./command/encoder.js";
+
+// ---- 后端 --------------------------------------------------------------------
+export * from "./device/backend/mock/MockDevice.js";
+export * from "./device/backend/webgl2/WebGL2Device.js";
+export * from "./device/backend/webgpu/WebGPUDevice.js";
+
+// ---- 渲染层 -----------------------------------------------------------------
+export * from "./render/Geometry.js";
+export * from "./render/primitives.js";
+export * from "./render/UniformBlock.js";
+export * from "./render/material.js";
+export * from "./render/Mesh.js";
+export * from "./render/texture.js";
+export * from "./render/Camera.js";
+export * from "./render/shaders.js";
+export * from "./render/Renderer.js";
+
+// ---- 工具 -------------------------------------------------------------------
+export * from "./util/assert.js";
+export * from "./util/logger.js";

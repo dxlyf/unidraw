@@ -1,0 +1,6 @@
+node_modules/
+dist/
+dist-examples/
+*.tsbuildinfo
+.DS_Store
+*.log

@@ -1,0 +1,44 @@
+{
+  "name": "unidraw",
+  "version": "0.1.0",
+  "description": "UniDraw — 基于 TypeScript 的统一图形框架：同一套绘制命令运行在 WebGL2 与 WebGPU 之上。",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "build:examples": "node tools/build-examples.mjs",
+    "build:all": "npm run build && npm run build:examples",
+    "test": "npm run build && node --test \"dist/__tests__/*.test.js\"",
+    "serve": "node tools/serve.mjs"
+  },
+  "keywords": [
+    "webgl2",
+    "webgpu",
+    "graphics",
+    "rendering",
+    "typescript",
+    "framework"
+  ],
+  "devDependencies": {
+    "@webgpu/types": "^0.1.72",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
