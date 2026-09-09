@@ -34,6 +34,9 @@ export * from "./render/Camera.js";
 export * from "./render/shaders.js";
 export * from "./render/Renderer.js";
 
+// ---- 2D 渲染层 ---------------------------------------------------------------
+export * from "./render2d/index.js";
+
 // ---- 工具 -------------------------------------------------------------------
 export * from "./util/assert.js";
 export * from "./util/logger.js";

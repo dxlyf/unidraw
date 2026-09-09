@@ -30,7 +30,7 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（25 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（34 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run serve          # 本地静态服务 → http://localhost:8080/
@@ -39,15 +39,25 @@ npm run serve          # 本地静态服务 → http://localhost:8080/
 打开 http://localhost:8080/ 后选择任意示例。默认 **WebGPU 优先，WebGL2 兜底**；
 用 URL 参数强制后端：`?backend=webgl2` / `?backend=webgpu`。
 
-### 2D 绘制示例
+### 2D 绘制（框架模块 `src/render2d` + 示例 `examples/shapes2d`）
 
-`examples/shapes2d`：一个画布式的 2D 绘制示例（矩形 / 线 / 圆 / 椭圆 / 多边形，
-支持填充与描边、顶点色、alpha 混合、描边厚度）：
+框架内置了 Canvas2D 风格的 **`Canvas2D` 模块**（`src/render2d/`），
+WebGL2 / WebGPU 共用一套实现：
 
-- 坐标即像素（原点左上），通过正交投影矩阵（每帧随画布重建）映射到 NDC；
-- 自定义 2D 着色器（`position.xy + 顶点色`），图元在 CPU 侧三角化后合批为
-  **每帧一次 drawIndexed**（动态缓冲，便于动画）；
-- 包含动画：移动小矩形、轨道圆、半径可变的脉冲圆、旋转星形。
+- 路径：`rect / roundRect / line / quadraticCurveTo / bezierCurveTo /
+  arc / arcTo / ellipse / closePath`（曲线自适应细分）；
+- 填充与描边：`fill()`（凸/凹多边形、耳切）/ `stroke()`（`lineCap`
+  butt·round·square，`lineJoin` miter·round·bevel，`miterLimit`，`lineWidth`）；
+- 样式：十六进制 / `Color` / `LinearGradient`（多点）/ `RadialGradient`(近似)，
+  `globalAlpha`；
+- 变换与层级：`translate / rotate / scale / setTransform` + `save()/restore()`
+  （连同样式、字体、裁剪一起压栈）；
+- 裁剪：`clipRect` / `clip()`（轴对齐矩形，设备空间 scissor，可嵌套）；
+- 文本：`fillText` + `font`（隐藏 canvas 栅格化字形 → 纹理缓存、随 fillStyle 着色）；
+- 性能：CPU 三角化 → 动态合批，每帧少量 `drawIndexed`。
+
+`examples/shapes2d` 展示了上述全部能力（含动画与裁剪层叠）。
+模块用法与边界见 [docs/render2d.md](docs/render2d.md)。
 
 ### 性能示例
 
@@ -115,6 +125,8 @@ src/
   command/     ops.ts（统一命令）、encoder.ts（CommandEncoder/RenderPassEncoder/CommandBuffer）
   render/      Geometry/primitives、UniformBlock、material（内置材质）、texture、
                Mesh、Camera、Renderer 门面、shaders（GLSL+WGSL）
+  render2d/    Canvas2D 完整 2D：路径/贝塞尔/arc/圆角矩形、填充描边、渐变、
+               变换、文本、裁剪（WebGL2/WebGPU 共用）
   __tests__    node --test 测试
 examples/      8 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
@@ -138,6 +150,7 @@ docs/          中文文档（见下）
 
 - [架构与设计](docs/architecture.md)
 - [统一绘制命令规范](docs/command-spec.md)
+- [render2d 2D 绘图模块](docs/render2d.md)
 - [着色器写作指南](docs/shader-guide.md)
 - [扩展指南（新后端 / 新材质 / 新示例）](docs/extension.md)
 

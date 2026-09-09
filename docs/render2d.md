@@ -1,0 +1,94 @@
+# render2d —— 框架级 2D 绘图模块
+
+`Canvas2D` 提供类 Canvas2D 的即时模式 2D 绘制 API，且与 WebGL2 / WebGPU
+共用同一套实现（三角形由 CPU 端生成，动态合批后以少量 `drawIndexed` 提交）。
+
+## 快速上手
+
+```ts
+import { createDevice, Canvas2D, LinearGradient } from "unidraw";
+import { Mat4 } from "unidraw";
+
+const device = await createDevice({ canvas, backend: "auto" });
+const c2d = new Canvas2D(device);
+const pass = /* 每帧 beginFrame 得到的 RenderPassEncoder */;
+
+// 每帧：
+c2d.setViewportSize(canvas.width, canvas.height);
+c2d.begin();
+
+c2d.fillStyle = "#ff5c7a";
+c2d.beginPath();
+c2d.roundRect(20, 20, 160, 90, [40, 8, 8, 40]);
+c2d.fill();
+
+c2d.fillStyle = new LinearGradient(0, 200, 400, 200).addColorStop(0, "#4c8dff").addColorStop(1, "#35d7ee");
+c2d.fillRect(20, 240, 300, 60);
+
+c2d.save();
+c2d.translate(400, 300);
+c2d.rotate(time);
+c2d.fillStyle = "#f5d02e";
+c2d.fillRect(-40, -40, 80, 80);
+c2d.restore();
+
+c2d.font = "600 28px system-ui";
+c2d.fillStyle = "#f2f5ff";
+c2d.fillText("你好 2D", 40, 420);
+
+c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
+```
+
+坐标体系：**像素坐标、原点左上**（由你传入的 `Mat4.ortho(0,w,h,0,…)` 决定），
+与示例保持一致。
+
+## 能力清单
+
+### 路径
+- `rect` / `roundRect`（半径可为数值或 `[tl,tr,br,bl]`）
+- `moveTo/lineTo`、`quadraticCurveTo`、`bezierCurveTo`
+- `arc`（圆/圆弧，含方向）、`arcTo`、`ellipse`（旋转椭圆）、`closePath`
+- 曲线按容差**自适应细分**（`flatten(tolerance)`）
+
+### 填充与描边
+- `fill()`：单轮廓填充，凸多边形扇形、凹多边形耳切；多个子路径各自填充
+- `stroke()`：线宽 / `lineCap`(butt/round/square) / `lineJoin`(miter/round/bevel)
+  / `miterLimit`
+- 便捷：`fillRect/strokeRect/fillCircle/strokeCircle`
+
+### 样式
+- `fillStyle / strokeStyle`：十六进制字符串 / `Color` / `LinearGradient`
+  （多点 stops）/ `RadialGradient`（近似，靠三角化细分平滑）
+- `globalAlpha`、`lineWidth`…
+
+### 变换与层级
+- `translate / scale / rotate / setTransform / resetTransform`
+- `save() / restore()` 保存整份状态：CTM、样式、透明度、线属性、字体与裁剪
+- 画布内重叠即“层级”，绘制顺序即 z 序
+
+### 裁剪
+- `clipRect(x,y,w,h)` 与 `clip()`（要求当前路径是轴对齐矩形路径）；
+- 裁剪为**设备空间 scissor**，可与 `save/restore` 嵌套求交；
+- 说明：任意路径裁剪需要 stencil 支持，暂未开放。
+
+### 文本
+- `fillText(text, x, y)`（以基线 y 对齐；默认左对齐）
+- `font` 设为 CSS font 简写；字形通过隐藏 2D canvas 栅格化为纹理并缓存
+  （LRU，最多 96 个）；仅浏览器可用（`text.ts` 会给出明确错误）
+- 文本颜色跟随 `fillStyle`（纯色/渐变都会采样到四边形顶点）
+
+### 性能
+- 每帧 CPU 三角化 → 单个动态缓冲 + 按 op 顺序（裁剪分段）少量 draw；
+- 顶点色插值 = 纯色/线性渐变精确（颜色场线性 ⇒ 重心插值无误差）。
+
+## 已知边界（v0.1）
+- 裁剪仅限轴对齐矩形；路径级/任意形状裁剪未实现；
+- 多子路径填充为“各自填充”（不叠加组合为非零/奇偶规则）；
+- 圆角 join 用扇形逼近；渐变按顶点采样（线性精确，径向近似）；
+- 字形纹理在 DPR>1 时以设备像素栅格化（缩小绘制可能略糊，可后续按 DPR 缓存）；
+- 无图片/图案填充与阴影、滤镜。
+
+## 测试
+纯 CPU 部分（压平/三角化/矩阵/样式采样）在 `src/__tests__/render2d.test.ts`
+中覆盖，`npm test` 可直接运行；示例 `examples/shapes2d` 覆盖完整能力并在
+WebGL2 / WebGPU 上无头验证。
