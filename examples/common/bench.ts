@@ -73,9 +73,19 @@ function pixelScaleFromUrl(fallback: number): number {
   return fallback;
 }
 
+function dwellFromUrl(fallback: number): number {
+  try {
+    const v = Number(new URLSearchParams(location.search).get("dwell"));
+    if (v >= 200 && v <= 30000) return v;
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
+
 export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   const pixelScale = pixelScaleFromUrl(options.pixelScale ?? 1);
-  const dwellMs = options.dwellMs ?? 3000;
+  const dwellMs = dwellFromUrl(options.dwellMs ?? 3000);
 
   // ---- DOM ---------------------------------------------------------------
   const canvas = document.createElement("canvas");

@@ -152,6 +152,16 @@ export const ColorWriteMask = {
   ALL: 0xf,
 } as const;
 
+/**
+ * BindGroupLayout 的“内容指纹”：内容相同的布局可以安全共用，
+ * 从而在 WebGL2 后端只分配一次 UBO binding point / 纹理单元
+ * （避免大量同构材质把有限的 binding 资源耗尽）。
+ */
+export function bindGroupLayoutCacheKey(desc: BindGroupLayoutDescriptor): string {
+  const entries = desc.entries.map((e) => `${e.binding}:${e.type}:${e.visibility}:${e.name ?? ""}`).sort().join("|");
+  return `[${entries}]`;
+}
+
 export interface DepthStencilStateDescriptor {
   format: TextureFormat;
   depthWriteEnabled: boolean;

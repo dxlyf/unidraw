@@ -25,6 +25,7 @@ import type {
 } from "../../descriptors.js";
 import { assert, UnidrawError } from "../../../util/assert.js";
 import type { CommandOp } from "../../../command/ops.js";
+import { bindGroupLayoutCacheKey } from "../../descriptors.js";
 import type { ColorClearValue } from "../../../gpu/types.js";
 import { textureFormatInfo, vertexFormatInfo, INDEX_FORMAT_BYTES } from "../../../gpu/formats.js";
 import {
@@ -428,9 +429,11 @@ class GLBindGroupLayout extends BindGroupLayout {
   readonly uboPoints: number[];
   /** texture entry 的纹理单元（与 texture entry 顺序对齐） */
   readonly textureUnits: number[];
+  private readonly _device: WebGL2Device;
 
   constructor(device: WebGL2Device, desc: BindGroupLayoutDescriptor) {
     super(desc);
+    this._device = device;
     const ubo: number[] = [];
     const units: number[] = [];
     for (const entry of desc.entries) {
@@ -442,7 +445,12 @@ class GLBindGroupLayout extends BindGroupLayout {
     device.register(this);
   }
 
-  protected destroyNative(): void {}
+  protected destroyNative(): void {
+    // 归还 binding point / 纹理单元，并让其失效的缓存项可被重新分配
+    for (const point of this.uboPoints) this._device.freeUniformBinding(point);
+    for (const unit of this.textureUnits) this._device.freeTextureUnit(unit);
+    this._device.dropLayoutCache(this);
+  }
 }
 
 class GLBindGroup extends BindGroup {
@@ -496,6 +504,9 @@ export class WebGL2Device extends Device {
   private _textureUnitCursor = 0;
   private readonly _vaos = new Map<string, WebGLVertexArrayObject>();
   private readonly _fbos = new Map<string, WebGLFramebuffer>();
+  private readonly _layoutCache = new Map<string, GLBindGroupLayout>();
+  private readonly _uboFree: number[] = [];
+  private readonly _texFree: number[] = [];
   private _scissorEnabled = false;
   private _limits: DeviceLimits | null = null;
 
@@ -552,7 +563,14 @@ export class WebGL2Device extends Device {
   }
 
   override createBindGroupLayout(desc: BindGroupLayoutDescriptor): BindGroupLayout {
-    return new GLBindGroupLayout(this, desc);
+    // 内容去重：相同布局共享同一组 UBO binding point / 纹理单元，
+    // 防止大量同构材质耗尽有限的 GL binding 资源
+    const key = bindGroupLayoutCacheKey(desc);
+    const cached = this._layoutCache.get(key);
+    if (cached) return cached;
+    const layout = new GLBindGroupLayout(this, desc);
+    this._layoutCache.set(key, layout);
+    return layout;
   }
 
   override createBindGroup(desc: BindGroupDescriptor): BindGroup {
@@ -564,15 +582,34 @@ export class WebGL2Device extends Device {
   }
 
   allocateUniformBinding(): number {
+    const reused = this._uboFree.pop();
+    if (reused !== undefined) return reused;
     const point = this._uniformBindingCursor++;
     assert(point < this.limits.maxUniformBufferBindings, "UBO binding point 耗尽");
     return point;
   }
 
   allocateTextureUnit(): number {
+    const reused = this._texFree.pop();
+    if (reused !== undefined) return reused;
     const unit = this._textureUnitCursor++;
     assert(unit < this.limits.maxTextureUnits - 1, "纹理单元耗尽（保留 1 个给内部操作）");
     return unit;
+  }
+
+  freeUniformBinding(point: number): void {
+    this._uboFree.push(point);
+  }
+
+  freeTextureUnit(unit: number): void {
+    this._texFree.push(unit);
+  }
+
+  /** 布局销毁时从缓存移除（避免复用已销毁布局）。 */
+  dropLayoutCache(layout: BindGroupLayout): void {
+    for (const [key, value] of this._layoutCache) {
+      if (value === layout) this._layoutCache.delete(key);
+    }
   }
 
   // -------------------------------------------------------------------------

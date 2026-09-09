@@ -68,7 +68,12 @@ export class Geometry {
     this.vertexBuffer.write(interleaved);
 
     if (data.indices) {
-      const maxIndex = Math.max(0, ...Array.from(data.indices));
+      // 注意：不能 Math.max(...indices) 展开 —— 大量索引会导致调用栈溢出
+      let maxIndex = 0;
+      for (let i = 0; i < data.indices.length; i++) {
+        const v = data.indices[i]!;
+        if (v > maxIndex) maxIndex = v;
+      }
       this.indexFormat = maxIndex > 0xffff ? "uint32" : "uint16";
       this.indexCount = data.indices.length;
       this.indexBuffer = device.createBuffer({

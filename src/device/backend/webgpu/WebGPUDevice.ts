@@ -22,6 +22,7 @@ import type {
   TextureUploadOptions,
 } from "../../descriptors.js";
 import { assert, UnidrawError } from "../../../util/assert.js";
+import { bindGroupLayoutCacheKey } from "../../descriptors.js";
 import type { CommandBuffer } from "../../../command/encoder.js";
 import type { CommandOp, DepthStencilAttachmentOp } from "../../../command/ops.js";
 import type { ColorClearValue, TextureFormat } from "../../../gpu/types.js";
@@ -361,6 +362,7 @@ export class WebGPUDevice extends Device {
   private _internalDepthH = 0;
   private _configuredW = -1;
   private _configuredH = -1;
+  private readonly _layoutCache = new Map<string, WebGPUBindGroupLayout>();
   private _limits: DeviceLimits | null = null;
 
   private constructor(adapter: GPUAdapter, gpu: GPUDevice, canvas: HTMLCanvasElement, canvasFormat: GPUTextureFormat) {
@@ -430,7 +432,12 @@ export class WebGPUDevice extends Device {
     return new WebGPUProgram(this, desc);
   }
   override createBindGroupLayout(desc: BindGroupLayoutDescriptor): BindGroupLayout {
-    return new WebGPUBindGroupLayout(this, desc);
+    const key = bindGroupLayoutCacheKey(desc);
+    const cached = this._layoutCache.get(key);
+    if (cached) return cached;
+    const layout = new WebGPUBindGroupLayout(this, desc);
+    this._layoutCache.set(key, layout);
+    return layout;
   }
   override createBindGroup(desc: BindGroupDescriptor): BindGroup {
     return new WebGPUBindGroup(this, desc);
