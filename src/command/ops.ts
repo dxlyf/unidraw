@@ -42,7 +42,13 @@ export type CommandOp =
     }
   | { k: "endRenderPass" }
   | { k: "setPipeline"; pipeline: RenderPipeline }
-  | { k: "setBindGroup"; index: number; group: BindGroup; offsets: readonly number[] | null }
+  /**
+   * 绑定 bind group。动态偏移**内联存两个整数**（不分配数组）：
+   * 逐 draw 换槽的高频路径（例如共享材质的模型矩阵 + ID 槽）每次绘制都会调用它，
+   * 若在这里存 `number[]` 引用，一帧几万次绘制就是几万个短命数组。
+   * 偏移非负整数、布局里最多 `MAX_DYNAMIC_OFFSETS` 个动态 entry。
+   */
+  | { k: "setBindGroup"; index: number; group: BindGroup; offset0: number; offset1: number; offsetCount: number }
   | { k: "setVertexBuffer"; slot: number; buffer: Buffer | null; offset: number }
   | { k: "setIndexBuffer"; buffer: Buffer | null; format: IndexFormat; offset: number }
   | { k: "draw"; vertexCount: number; instanceCount: number; firstVertex: number; firstInstance: number }
@@ -60,4 +66,23 @@ export interface DrawOp {
   firstIndex: number;
   baseVertex: number;
   firstInstance: number;
+}
+
+/**
+ * 一次 `setBindGroup` 最多支持的动态偏移个数。
+ *
+ * 内置布局最多用到 2 个：模型矩阵环（binding 1）+ 材质自己的动态块（如 ID 槽 binding 4）。
+ * 需要更多时请扩展这个常量与 `RenderPassEncoder.setBindGroup` 的内联字段。
+ */
+export const MAX_DYNAMIC_OFFSETS = 2;
+
+/** 从 op 里读出动态偏移（长度 = `offsetCount`；`out` 可复用以避免分配） */
+export function readDynamicOffsets(
+  op: { offset0: number; offset1: number; offsetCount: number },
+  out: number[] = [],
+): number[] {
+  out.length = op.offsetCount;
+  if (op.offsetCount > 0) out[0] = op.offset0;
+  if (op.offsetCount > 1) out[1] = op.offset1;
+  return out;
 }

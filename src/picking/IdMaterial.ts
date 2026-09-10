@@ -33,6 +33,8 @@ export class IdMaterial extends BaseMaterial {
   private _idSlotCount: number;
   private _idColor: [number, number, number] = [0, 0, 0];
   private _id = 0;
+  /** 逐 draw 复用的动态偏移数组 */
+  private readonly _extraOffsets: number[] = [0];
 
   constructor(device: Device, opts: MaterialOptions = {}) {
     super(
@@ -42,7 +44,7 @@ export class IdMaterial extends BaseMaterial {
         glsl: { vertex: ID_VERTEX_GLSL, fragment: ID_FRAGMENT_GLSL },
         wgsl: { code: ID_WGSL },
       }),
-      { ...opts, label: opts.label ?? "unidraw-id-material" },
+      { ...opts, label: opts.label ?? "unidraw-id-material", instancedVertex: ID_INSTANCED_VERTEX },
       [{ binding: 4, type: "uniform-buffer", visibility: 1, name: "IdBlock", hasDynamicOffset: true }],
     );
     this._idSlotCount = this.modelSlotCount;
@@ -88,7 +90,9 @@ export class IdMaterial extends BaseMaterial {
     const [r, g, b] = this._idColor;
     this._idBlock.setVec4("u_id", r / 255, g / 255, b / 255, 1);
     this._idBlock.flushSlot(slot);
-    return [slot * this._idBlock.stride];
+    // 复用数组：逐 draw 分配会让 GPU 颜色拾取（每帧全场景一次）产生大量短命数组
+    this._extraOffsets[0] = slot * this._idBlock.stride;
+    return this._extraOffsets;
   }
 
   private growIdRing(needed: number): void {
@@ -130,7 +134,6 @@ in vec4 v_id;
 out vec4 fragColor;
 void main() { fragColor = v_id; }
 `;
-
 const ID_WGSL = `
 struct CameraBlock {
   u_viewProj : mat4x4f,
@@ -165,3 +168,73 @@ fn fs_main(in : VSOut) -> @location(0) vec4f {
   return in.v_id;
 }
 `;
+
+/** GLSL：ID 材质的实例化顶点着色器（ID 逐 draw 写入，所有实例共享同一个 ID） */
+const ID_INSTANCED_VERTEX = {
+  glsl: `#version 300 es
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+layout(location = 3) in vec4 a_instance0;
+layout(location = 4) in vec4 a_instance1;
+layout(location = 5) in vec4 a_instance2;
+layout(location = 6) in vec4 a_instance3;
+
+layout(std140) uniform CameraBlock {
+  mat4 u_viewProj;
+  vec4 u_cameraPos;
+};
+layout(std140) uniform ModelBlock {
+  mat4 u_model;
+};
+layout(std140) uniform IdBlock {
+  vec4 u_id;
+};
+
+out vec4 v_id;
+
+void main() {
+  mat4 instance = mat4(a_instance0, a_instance1, a_instance2, a_instance3);
+  v_id = u_id;
+  gl_Position = u_viewProj * u_model * instance * vec4(a_position, 1.0);
+}
+`,
+  wgsl: `
+struct CameraBlock {
+  u_viewProj : mat4x4f,
+  u_cameraPos : vec4f,
+};
+struct ModelBlock {
+  u_model : mat4x4f,
+};
+struct IdBlock {
+  u_id : vec4f,
+};
+
+@group(0) @binding(0) var<uniform> camera : CameraBlock;
+@group(0) @binding(1) var<uniform> model : ModelBlock;
+@group(0) @binding(4) var<uniform> idBlock : IdBlock;
+
+struct VSOut {
+  @builtin(position) clip_pos : vec4f,
+  @location(0) v_id : vec4f,
+};
+
+@vertex
+fn vs_main(
+  @location(0) a_position : vec3f,
+  @location(1) a_normal : vec3f,
+  @location(2) a_uv : vec2f,
+  @location(3) a_instance0 : vec4f,
+  @location(4) a_instance1 : vec4f,
+  @location(5) a_instance2 : vec4f,
+  @location(6) a_instance3 : vec4f,
+) -> VSOut {
+  var out : VSOut;
+  let instance = mat4x4f(a_instance0, a_instance1, a_instance2, a_instance3);
+  out.clip_pos = camera.u_viewProj * model.u_model * instance * vec4f(a_position, 1.0);
+  out.v_id = idBlock.u_id;
+  return out;
+}
+`,
+};

@@ -24,6 +24,7 @@ const demos = [
   { name: "shapes", title: "形状 · 多几何体/深度/轨道相机" },
   { name: "textures", title: "纹理 · 采样/寻址" },
   { name: "instancing", title: "实例化 · 自定义着色器 + instance 顶点流" },
+  { name: "instanced-mesh", title: "InstancedMesh · 一次绘制 N 个实例（含与独立 Mesh 的逐像素对比）" },
   { name: "shapes2d", title: "2D 绘制 · 矩形/线/圆/椭圆/多边形" },
   { name: "shapes3d", title: "3D · 材质与几何画廊" },
   { name: "picking", title: "拾取 · 射线几何命中 + GPU 颜色拾取" },

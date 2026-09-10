@@ -22,6 +22,8 @@ export interface MockDrawCall {
   passIndex: number;
   pipeline: RenderPipeline;
   bindGroups: (BindGroup | null)[];
+  /** 每个 bind group 的动态偏移快照（无动态偏移为 null） */
+  bindGroupOffsets: (number[] | null)[];
   vertexBuffers: MockVertexBufferBinding[];
   indexBuffer: MockIndexBufferBinding | null;
   draw: {

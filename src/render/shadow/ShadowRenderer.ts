@@ -33,6 +33,7 @@ import { DirectionalLight } from "../lights/DirectionalLight.js";
 import { SpotLight } from "../lights/SpotLight.js";
 import { collectLightNodes } from "../lights/collectLightNodes.js";
 import { Vec3 } from "../../math/vec3.js";
+import { InstancedMesh } from "../InstancedMesh.js";
 import { ShadowCamera } from "./ShadowCamera.js";
 import { ShadowDepthMaterial } from "./ShadowDepthMaterial.js";
 import { shadowResources, type ShadowResources } from "./ShadowResources.js";
@@ -186,6 +187,16 @@ export class ShadowRenderer {
       material.beginFrame();
       for (let m = 0; m < visible.length; m++) {
         const mesh = visible[m]!;
+        if (mesh instanceof InstancedMesh && mesh.instanceCount > 0) {
+          // InstancedMesh：一次深度绘制画全部实例（深度材质用的是标准顶点着色器，
+          // 会自动换成实例化版本）
+          mesh.upload();
+          if (material.drawInstanced) {
+            material.drawInstanced(pass, mesh.geometry, mesh.worldMatrix, mesh);
+            this.stats.drawn++;
+            continue;
+          }
+        }
         material.drawGeometry(pass, mesh.geometry, mesh.worldMatrix);
         this.stats.drawn++;
       }

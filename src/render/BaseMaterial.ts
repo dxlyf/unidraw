@@ -1,5 +1,5 @@
 import type { Device } from "../device/Device.js";
-import type { BindGroup, BindGroupLayout, Program, RenderPipeline } from "../device/resources.js";
+import type { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline } from "../device/resources.js";
 import type { BindGroupEntryDescriptor, BindGroupLayoutEntryDescriptor } from "../device/descriptors.js";
 import type { TextureFormat } from "../gpu/types.js";
 import type { RenderPassEncoder } from "../command/encoder.js";
@@ -10,7 +10,20 @@ import { ColorWriteMask } from "../device/descriptors.js";
 import { assert } from "../util/assert.js";
 import type { Geometry } from "./Geometry.js";
 import { Mesh } from "./Mesh.js";
-import { CAMERA_FIELDS, MATERIAL_FIELDS, MODEL_FIELDS, STANDARD_VERTEX_STATE, defaultBlendState, defaultGroupEntries, depthFormatOf, targetFormatOf } from "./materialCommon.js";
+import {
+  CAMERA_FIELDS,
+  INSTANCE_VERTEX_SLOT,
+  MATERIAL_FIELDS,
+  MODEL_FIELDS,
+  STANDARD_VERTEX_STATE,
+  STANDARD_VERTEX_STATE_INSTANCED,
+  defaultBlendState,
+  defaultGroupEntries,
+  depthFormatOf,
+  targetFormatOf,
+} from "./materialCommon.js";
+import { VERTEX_GLSL, VERTEX_INSTANCED_GLSL, VERTEX_INSTANCED_WGSL, VERTEX_WGSL } from "./shaders/standard.js";
+import type { InstancedDrawSource } from "../scene/types.js";
 import { LIGHTS_FIELDS, LightsState } from "./lights/LightsState.js";
 import { MAX_SHADOW_MAPS } from "./shadow/constants.js";
 import { SHADOW_BLOCK_BINDING, SHADOW_SAMPLER_BINDING, SHADOW_TEXTURE_BINDING } from "./shadow/ShadowState.js";
@@ -43,6 +56,13 @@ export interface MaterialOptions {
    * 某张纹理既作为附件写入、又作为只读纹理资源绑定。
    */
   receiveShadows?: boolean;
+  /**
+   * 自定义的**实例化顶点着色器**（配合 `InstancedMesh`）。
+   *
+   * 内置材质不需要传：`BaseMaterial` 发现顶点源码就是标准的 `VERTEX_GLSL`/`VERTEX_WGSL`
+   * 时会自动换成实例化版本；只有自定义顶点着色器的材质（例如 ID 材质）才需要提供。
+   */
+  instancedVertex?: { glsl: string; wgsl: string };
   /** 每帧最多绘制的物体数（模型矩阵环形槽初始容量，超出自动扩容） */
   modelRingSlots?: number;
   label?: string;
@@ -85,8 +105,16 @@ export abstract class BaseMaterial {
   private readonly _flushBlocks: UniformBlock[] = [];
   /** 上次建 bind group 时的阴影资源版本（贴图池变化时重建） */
   private _shadowVersion = -1;
+  /** 逐 draw 复用的动态偏移数组（避免在热路径上分配） */
+  private readonly _drawOffsets: number[] = [];
   /** 是否接收阴影（false 时布局/绑定都不含阴影槽位） */
   private readonly _receiveShadows: boolean;
+  /** 实例化管线（按「实例化 + 采样数」缓存；首次 `drawInstanced` 时创建） */
+  private readonly _instancedPipelines = new Map<number, RenderPipeline>();
+  /** 实例化程序（顶点着色器换成实例化版本；null = 该材质不支持实例化） */
+  private _instancedProgram: Program | null | undefined = undefined;
+  /** 退化路径用的临时矩阵（材质不支持实例化时逐实例绘制） */
+  private readonly _fallbackMatrix = new Mat4();
 
   /**
    * 按附件的采样数取管线。WebGPU 要求管线的 `multisample.count` 与附件一致，
@@ -96,18 +124,44 @@ export abstract class BaseMaterial {
   private _pipelineFor(sampleCount: number): RenderPipeline {
     const cached = this._pipelinesBySamples.get(sampleCount);
     if (cached) return cached;
-    const pipeline = this._createPipeline(sampleCount, targetFormatOf(this.device, this._opts), this._opts.depth !== false);
+    const pipeline = this._createPipeline(sampleCount, targetFormatOf(this.device, this._opts), this._opts.depth !== false, false);
     this._pipelinesBySamples.set(sampleCount, pipeline);
     return pipeline;
   }
 
-  private _createPipeline(sampleCount: number, targetFormat: TextureFormat, depth: boolean): RenderPipeline {
+  /** 实例化管线（顶点流多一条 `stepMode: "instance"` 的实例矩阵流） */
+  private _instancedPipelineFor(sampleCount: number): RenderPipeline | null {
+    const program = this._resolveInstancedProgram();
+    if (!program) return null;
+    const cached = this._instancedPipelines.get(sampleCount);
+    if (cached) return cached;
+    const pipeline = this._createPipeline(
+      sampleCount,
+      targetFormatOf(this.device, this._opts),
+      this._opts.depth !== false,
+      true,
+      program,
+    );
+    this._instancedPipelines.set(sampleCount, pipeline);
+    return pipeline;
+  }
+
+  private _createPipeline(
+    sampleCount: number,
+    targetFormat: TextureFormat,
+    depth: boolean,
+    instanced: boolean,
+    program: Program = this._program,
+  ): RenderPipeline {
     const depthOnly = this._opts.depthOnly === true;
+    const suffix = instanced ? "-instanced" : "";
     return this.device.createRenderPipeline({
-      label: this._opts.label ? `${this._opts.label}${sampleCount > 1 ? `-msaa${sampleCount}` : ""}` : undefined,
-      program: this._program,
+      label: this._opts.label
+        ? `${this._opts.label}${suffix}${sampleCount > 1 ? `-msaa${sampleCount}` : ""}`
+        : undefined,
+      program,
       bindGroupLayouts: [this.layout],
-      vertex: STANDARD_VERTEX_STATE,
+      vertex: instanced ? STANDARD_VERTEX_STATE_INSTANCED : STANDARD_VERTEX_STATE,
       primitive: { topology: "triangle-list", cullMode: this._opts.cullMode ?? "back", frontFace: "ccw" },
       depthStencil:
         depth === false
@@ -126,6 +180,45 @@ export abstract class BaseMaterial {
     });
   }
 
+  /**
+   * 找到（或构造）实例化程序：把标准顶点着色器换成实例化版本。
+   *
+   * 内置材质都用 `VERTEX_GLSL`/`VERTEX_WGSL`，因此这里按字符串前缀/相等识别即可；
+   * 自定义顶点着色器的材质可通过 `MaterialOptions.instancedVertex` 显式提供。
+   */
+  private _resolveInstancedProgram(): Program | null {
+    if (this._instancedProgram !== undefined) return this._instancedProgram;
+    const desc = this._program.descriptor;
+    const custom = this._opts.instancedVertex;
+    let glsl = desc.glsl;
+    let wgsl = desc.wgsl;
+    let ok = false;
+    if (custom) {
+      glsl = { vertex: custom.glsl, fragment: desc.glsl?.fragment ?? "" };
+      wgsl = { ...desc.wgsl, code: custom.wgsl + (desc.wgsl ? desc.wgsl.code.slice(VERTEX_WGSL.length) : "") };
+      ok = true;
+    } else {
+      if (glsl && glsl.vertex === VERTEX_GLSL) {
+        glsl = { vertex: VERTEX_INSTANCED_GLSL, fragment: glsl.fragment };
+        ok = true;
+      }
+      if (wgsl && wgsl.code.startsWith(VERTEX_WGSL)) {
+        wgsl = { ...wgsl, code: VERTEX_INSTANCED_WGSL + wgsl.code.slice(VERTEX_WGSL.length) };
+        ok = true;
+      }
+    }
+    if (!ok || (!glsl && !wgsl)) {
+      this._instancedProgram = null;
+      return null;
+    }
+    this._instancedProgram = this.device.createProgram({
+      label: this._opts.label ? `${this._opts.label}-instanced-program` : undefined,
+      glsl,
+      wgsl,
+    });
+    return this._instancedProgram;
+  }
+
   protected constructor(device: Device, program: Program, opts: MaterialOptions, extraLayoutEntries: BindGroupLayoutEntryDescriptor[] = []) {
     this.device = device;
     this._program = program;
@@ -137,7 +230,7 @@ export abstract class BaseMaterial {
       label: opts.label ? `${opts.label}-layout` : undefined,
       entries: [...defaultGroupEntries({ shadows: this._receiveShadows }), ...extraLayoutEntries],
     });
-    this.pipeline = this._createPipeline(1, targetFormat, depth);
+    this.pipeline = this._createPipeline(1, targetFormat, depth, false);
     this._pipelinesBySamples.set(1, this.pipeline);
     this.cameraBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-camera` : "camera", fields: CAMERA_FIELDS });
     this._modelSlotCount = Math.max(1, Math.floor(opts.modelRingSlots ?? 4));
@@ -267,8 +360,46 @@ export abstract class BaseMaterial {
     this.drawGeometry(pass, mesh.geometry, mesh.model);
   }
 
-  /** 绘制任意几何体 + 模型矩阵。 */
-  drawGeometry(pass: RenderPassEncoder, geometry: Geometry, model: Mat4): void {
+  /**
+   * 一次绘制多个实例（`InstancedMesh`）。
+   *
+   * - 有实例化管线时：绑定实例矩阵顶点流（slot 1）+ **一次** `draw(instanceCount)`；
+   * - 没有（材质用了自定义顶点着色器且未提供 `instancedVertex`）时：
+   *   退化成 N 次 `drawGeometry`（正确性优先，性能退化在日志/文档里有说明）。
+   */
+  drawInstanced(pass: RenderPassEncoder, geometry: Geometry, model: Mat4, source: InstancedDrawSource): void {
+    const count = source.instanceCount;
+    if (count <= 0) return;
+    const pipeline = this._instancedPipelineFor(pass.sampleCount);
+    if (!pipeline) {
+      // 退化：每个实例一次普通绘制（model × instanceMatrix）
+      for (let i = 0; i < count; i++) {
+        source.getMatrixAt(i, this._fallbackMatrix);
+        Mat4.multiply(model, this._fallbackMatrix, this._fallbackMatrix);
+        this.drawGeometry(pass, geometry, this._fallbackMatrix);
+      }
+      return;
+    }
+    const instanceMatrices = source.instanceBuffer;
+    const extra = this._recordDrawState(pass, geometry, model, pipeline, instanceMatrices);
+    void extra;
+    if (geometry.indexFormat) {
+      assert(geometry.indexBuffer, "有 indexFormat 就必须有 indexBuffer");
+      pass.setIndexBuffer(geometry.indexBuffer, geometry.indexFormat);
+      pass.drawIndexed(geometry.indexCount, count);
+    } else {
+      pass.draw(geometry.vertexCount, count);
+    }
+  }
+
+  /** 记录管线/绑定组/顶点流（普通与实例化绘制共用；返回本帧占用的环形槽序号） */
+  private _recordDrawState(
+    pass: RenderPassEncoder,
+    geometry: Geometry,
+    model: Mat4,
+    pipeline: RenderPipeline,
+    instanceBuffer: Buffer | null,
+  ): number {
     // 槽位只要在一次提交内互不相同即可：检测到新的 submit 就安全复用
     const submits = this.device.submitCount;
     if (submits !== this._seenSubmitCount) {
@@ -282,10 +413,24 @@ export abstract class BaseMaterial {
     this.modelBlock.flushSlot(slot);
     const extra = this.extraDynamicOffsets(slot);
 
+    // 动态偏移按值内联进 op（见 `RenderPassEncoder.setBindGroup`），这里复用数组避免逐 draw 分配
+    const offsets = this._drawOffsets;
+    offsets.length = 0;
+    offsets.push(slot * this.modelBlock.stride);
+    for (let i = 0; i < extra.length; i++) offsets.push(extra[i]!);
+
     // 管线/绑定组状态由后端做冗余消除；这里始终记录，避免多材质交替时状态错乱
-    pass.setPipeline(this._pipelineFor(pass.sampleCount));
-    pass.setBindGroup(0, this.bindGroup, [slot * this.modelBlock.stride, ...extra]);
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.bindGroup, offsets);
     pass.setVertexBuffer(0, geometry.vertexBuffer);
+    if (instanceBuffer) pass.setVertexBuffer(INSTANCE_VERTEX_SLOT, instanceBuffer);
+    return slot;
+  }
+
+  /** 绘制任意几何体 + 模型矩阵。 */
+  drawGeometry(pass: RenderPassEncoder, geometry: Geometry, model: Mat4): void {
+    const pipeline = this._pipelineFor(pass.sampleCount);
+    this._recordDrawState(pass, geometry, model, pipeline, null);
     if (geometry.indexFormat) {
       assert(geometry.indexBuffer, "有 indexFormat 就必须有 indexBuffer");
       pass.setIndexBuffer(geometry.indexBuffer, geometry.indexFormat);

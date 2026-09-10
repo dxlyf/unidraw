@@ -9,8 +9,9 @@
 
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { Camera } from "../render/Camera.js";
-import type { Mat4 } from "../math/mat4.js";
 import { Mesh } from "../render/Mesh.js";
+import { InstancedMesh } from "../render/InstancedMesh.js";
+import { Mat4 } from "../math/mat4.js";
 import { Frustum } from "./Frustum.js";
 import type { Node3D } from "./Node3D.js";
 import type { MaterialLike } from "./types.js";
@@ -75,6 +76,8 @@ export class SceneRenderer {
   private readonly _eye = new Vec3();
   /** 本帧灯光打包缓冲（复用） */
   private readonly lights = new LightsState();
+  /** 退化实例绘制的临时矩阵（复用） */
+  private readonly _instanceMatrix = new Mat4();
 
   /**
    * 收集「可见（已剔除、已排序）」的 Mesh。
@@ -173,10 +176,28 @@ export class SceneRenderer {
     const stats = this.stats;
     for (let i = 0; i < list.length; i++) {
       const it = list[i]!;
-      it.material.drawGeometry(pass, it.mesh.geometry, it.mesh.worldMatrix);
-      stats.drawn++;
-      const g = it.mesh.geometry;
-      stats.triangles += g.indexCount > 0 ? g.indexCount / 3 : Math.floor(g.vertexCount / 3);
+      const mesh = it.mesh;
+      const instances = mesh instanceof InstancedMesh && mesh.instanceCount > 0 ? mesh : null;
+      if (instances) {
+        instances.upload();
+        if (it.material.drawInstanced) {
+          it.material.drawInstanced(pass, mesh.geometry, mesh.worldMatrix, instances);
+          stats.drawn++;
+        } else {
+          // 材质不支持实例化：退化成 N 次普通绘制（保证画面正确）
+          for (let k = 0; k < instances.instanceCount; k++) {
+            instances.getMatrixAt(k, this._instanceMatrix);
+            Mat4.multiply(mesh.worldMatrix, this._instanceMatrix, this._instanceMatrix);
+            it.material.drawGeometry(pass, mesh.geometry, this._instanceMatrix);
+            stats.drawn++;
+          }
+        }
+      } else {
+        it.material.drawGeometry(pass, mesh.geometry, mesh.worldMatrix);
+        stats.drawn++;
+      }
+      const g = mesh.geometry;
+      stats.triangles += g.indexCount > 0 ? (g.indexCount / 3) * (instances ? instances.instanceCount : 1) : Math.floor(g.vertexCount / 3) * (instances ? instances.instanceCount : 1);
     }
   }
 

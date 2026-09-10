@@ -18,6 +18,7 @@
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
 | 灯光 | `AmbientLight` / `DirectionalLight`(平行光) / `PointLight` / `SpotLight`（锥角+半影），灯是场景图节点、可动画驱动；每帧自动收集打包进 `LightsBlock`（方向 4 / 点 8 / 聚 4，无灯时使用与历史等价的默认光） |
 | 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 纹素对齐）/ 聚光（透视）各一张深度贴图，3×3 PCF 软阴影；`mapSize`/`bias`/`normalBias`/`radius` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
+| 实例化 | `InstancedMesh`：同一几何体 + 材质一次 draw 画 N 个实例（实例矩阵走 `stepMode: "instance"` 顶点流），自带脏区间上传、联合包围球剔除、阴影/拾取支持；与「N 个独立 Mesh」逐像素一致（示例自检 meanDiff = 0） |
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule**；闭合几何保证**无边界边（没有洞）/无零面积三角形/无非流形边**，体积与解析值一致（单测守护） |
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
 | 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
@@ -27,8 +28,8 @@
 | 离屏与后处理 | `RenderTarget`（格式/深度/**MSAA**/回读，三后端统一）+ `EffectComposer` 效果链（场景目标可选 MSAA → ping-pong 效果 → 呈现）；内置 `CopyPass`/`ToneMapPass`(ACES 等 4 种)/`BloomPass`/`VignettePass`/`GrayscalePass`/`ShaderPass`，自定义效果只要一对 fragment 源码 |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / App·插件（`node --test`，120 个用例） |
-| 示例 | 15 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**App+插件**与 3 个**性能档位**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / 实例化 / 资源缓存 / App·插件（`node --test`，129 个用例） |
+| 示例 | 16 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -118,6 +119,10 @@ WebGL2 / WebGPU 共用一套实现：
    `buffer.write`（这一步把 6 000 draws 从 24 fps 提到 59 fps，并让 WebGPU 反超 WebGL2）；
 3. **状态去重**：渲染通道编码器跳过同一 pass 内重复的 `setPipeline`/`setVertexBuffer`/
    `setIndexBuffer`，WebGL2 后端再加 VAO 快路径（20000 draws 时 74 ms → 44 ms）。
+4. **资源内容缓存**：`createProgram` / `createRenderPipeline` 按内容指纹去重
+   （同构材质只编译一次着色器、只建一条管线）；
+5. **零分配命令编码**：动态偏移按值内联进 op（不再每次绘制分配 `offsets` 数组），
+   逐 draw 复用的数组/临时对象集中在材质与编码器里。
 
 细节见 [docs/architecture.md](docs/architecture.md) §3.1 / §3.2。
 
@@ -326,7 +331,8 @@ src/
                constants.ts + gpuUtils.ts + resources/<每类一个文件> + <Backend>Device.ts
   command/     ops.ts（统一命令）、CommandBuffer / RenderPassEncoder / CommandEncoder
                （encoder.ts 为 barrel，保持 `command/encoder.js` 不变）
-  render/      Camera、Geometry、Mesh、UniformBlock、Renderer 门面、RenderTarget
+  render/      Camera、Geometry、Mesh、InstancedMesh、UniformBlock、Renderer 门面、
+               RenderTarget
     material.ts / shaders.ts / primitives.ts / texture.ts 均为 barrel；
     实现按「一个类/一个几何体/一份材质一个文件」放在同目录或子目录
     （materialCommon.ts、shaders/*、primitives/*、texture/*）
@@ -340,7 +346,7 @@ src/
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      15 个示例 + common/（demo 引导、bench 测量框架）
+examples/      16 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -372,6 +378,7 @@ docs/          中文文档（见下）
 - [动画（关键帧 · Mixer · Tween）](docs/animation.md)
 - [灯光（环境光/方向光/点光/聚光）](docs/lighting.md)
 - [阴影（Shadow Map）](docs/shadows.md)
+- [实例化（InstancedMesh）](docs/instancing.md)
 - [离屏渲染与后处理（RenderTarget · MSAA · EffectComposer）](docs/postfx.md)
 - [App 门面与插件](docs/app.md)
 - [着色器写作指南](docs/shader-guide.md)
@@ -383,7 +390,8 @@ docs/          中文文档（见下）
 
 - 点光阴影（cube map；WebGL2 需要每面各跑一趟）
 - 计算管线 / 存储缓冲 / indirect draw
-- 实例化合批（`InstancedMesh`）与更激进的命令编码去 GC
+- 命令编码去 GC（当前已内联动态偏移、去掉逐 draw 数组分配）
+- 更激进的实例化（实例动画放进 vertex/compute）
 - 纹理压缩格式、mipmap 自动生成（WebGL2 `generateMipmaps`、`maxAnisotropy`）
 - 更完整的数学（四元数、AABB、射线）
 - WebGPU 原生 GPU 队列级编码（当前在 submit 时翻译统一命令，换取三后端一致性）

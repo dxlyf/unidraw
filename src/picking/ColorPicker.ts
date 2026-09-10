@@ -16,6 +16,7 @@ import type { Device } from "../device/Device.js";
 import type { Texture } from "../device/resources.js";
 import type { Camera } from "../render/Camera.js";
 import type { Mesh } from "../render/Mesh.js";
+import { InstancedMesh } from "../render/InstancedMesh.js";
 import type { Node3D } from "../scene/Node3D.js";
 import { SceneRenderer } from "../scene/SceneRenderer.js";
 import { IdMaterial, decodeId } from "./IdMaterial.js";
@@ -146,6 +147,13 @@ export class ColorPicker {
       const id = i + 1;
       map[id] = mesh;
       mat.setId(id);
+      if (mesh instanceof InstancedMesh && mesh.instanceCount > 0 && mat.drawInstanced) {
+        // 实例化网格整体一个 ID（拾取到 InstancedMesh 本身；逐实例 ID 需要 ID 顶点流，
+        // 目前按「一个 InstancedMesh = 一个可选对象」处理）
+        mesh.upload();
+        mat.drawInstanced(pass, mesh.geometry, mesh.worldMatrix, mesh);
+        continue;
+      }
       mat.drawGeometry(pass, mesh.geometry, mesh.worldMatrix);
     }
     pass.end();

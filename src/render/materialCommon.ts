@@ -34,6 +34,30 @@ export const STANDARD_VERTEX_STATE: VertexStateDescriptor = {
   ],
 };
 
+/**
+ * 实例化顶点状态：标准顶点流 + `stepMode: "instance"` 的实例矩阵流（slot 1，stride 64）。
+ *
+ * 实例矩阵按列主序存 4 个 vec4（location 3..6），与 `InstancedMesh` 的实例缓冲一致。
+ */
+export const STANDARD_VERTEX_STATE_INSTANCED: VertexStateDescriptor = {
+  buffers: [
+    ...STANDARD_VERTEX_STATE.buffers,
+    {
+      arrayStride: 64,
+      stepMode: "instance",
+      attributes: [
+        { location: 3, format: "float32x4", offset: 0 },
+        { location: 4, format: "float32x4", offset: 16 },
+        { location: 5, format: "float32x4", offset: 32 },
+        { location: 6, format: "float32x4", offset: 48 },
+      ],
+    },
+  ],
+};
+
+/** 实例缓冲所在的顶点流序号（`InstancedMesh.instanceBuffer` 绑到这里） */
+export const INSTANCE_VERTEX_SLOT = 1;
+
 export const VS_FRAGMENT_VISIBILITY = 3; // VERTEX | FRAGMENT
 
 export function defaultBlendState() {

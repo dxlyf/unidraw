@@ -2,6 +2,7 @@ import { assert, UnidrawError } from "../util/assert.js";
 import type { BindGroup, Buffer, RenderPipeline } from "../device/resources.js";
 import type { IndexFormat } from "../gpu/types.js";
 import type { CommandOp } from "./ops.js";
+import { MAX_DYNAMIC_OFFSETS } from "./ops.js";
 
 /**
  * 渲染通道编码器：只能通过 `CommandEncoder.beginRenderPass()` 创建，
@@ -47,11 +48,21 @@ export class RenderPassEncoder {
    * 绑定 bind group。
    * @param offsets 动态偏移数组：与布局中 `hasDynamicOffset` 的 entry 顺序一一对应
    *                （语义与 WebGPU `setBindGroup(index, group, dynamicOffsets)` 一致）。
+   *                最多 `MAX_DYNAMIC_OFFSETS` 个；内部按值内联存储，不会持有/分配数组。
    */
   setBindGroup(index: number, group: BindGroup, offsets?: readonly number[] | null): void {
     this.assertActive();
     assert(index >= 0 && index < 4, `bind group index ${index} 超出范围`);
-    this._ops.push({ k: "setBindGroup", index, group, offsets: offsets && offsets.length > 0 ? offsets : null });
+    const count = offsets?.length ?? 0;
+    assert(count <= MAX_DYNAMIC_OFFSETS, `动态偏移最多 ${MAX_DYNAMIC_OFFSETS} 个，收到 ${count}`);
+    this._ops.push({
+      k: "setBindGroup",
+      index,
+      group,
+      offset0: count > 0 ? (offsets![0] ?? 0) : 0,
+      offset1: count > 1 ? (offsets![1] ?? 0) : 0,
+      offsetCount: count,
+    });
   }
 
   setVertexBuffer(slot: number, buffer: Buffer | null, offset = 0): void {

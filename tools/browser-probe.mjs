@@ -78,7 +78,7 @@ await send("Runtime.enable");
 await send("Page.enable");
 
 // 等待若干帧
-await sleep(4500);
+await sleep(Number(process.env.PROBE_WAIT_MS || 4500));
 
 const evalJs = async (expr) => {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true });

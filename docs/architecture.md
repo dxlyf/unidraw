@@ -131,6 +131,25 @@ CPU 侧只有一次 64B 的 `writeBuffer`（`perf-drawcalls` 示例即压这条�
 - **WebGL2 的 VAO 快路径**：连续绘制同一 pipeline/缓冲时跳过 VAO key 字符串构造与 Map 查询，
   并缓存当前绑定的 VAO（`gl.bindVertexArray` 只在变化时调用）。
 
+### 3.3 资源内容缓存与零分配命令编码
+
+- `createProgram` / `createRenderPipeline` 在 `Device` 层按**内容指纹**去重
+  （着色器源码哈希 + 程序 id + 顶点布局 + 光栅/深度/目标/采样数）：
+  同构材质（例如 25 个球各一个 `ColorMaterial`）只编译一次着色器、只建一条管线，
+  WebGL2 的 `useProgram` 去重命中率也随之提高；`device.programsCreated` /
+  `pipelinesCreated` 暴露实际创建数量（自检/面板用）；
+- 逐 draw 的热路径不做分配：动态偏移**按值内联**进命令 op
+  （`RenderPassEncoder.setBindGroup` 最多 `MAX_DYNAMIC_OFFSETS = 2` 个），
+  材质侧复用同一个 `offsets` 数组，ID 材质的额外偏移也用固定数组。
+
+### 3.4 实例化（InstancedMesh）
+
+同一几何体 + 材质的 N 个实例压成**一次 draw**：实例矩阵放在
+`stepMode: "instance"` 的顶点流（location 3..6，stride 64）上，
+顶点着色器计算 `u_model × instanceMatrix × position`；
+材质的顶点着色器是标准版本时 `BaseMaterial` 会自动换成实例化版本。
+细节与性能建议见 [instancing.md](instancing.md)。
+
 ## 4. BindGroup 在两种后端的等价实现
 
 ### WebGPU（原生）

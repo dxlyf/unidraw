@@ -100,7 +100,7 @@ export class WebGL2Device extends Device {
     return new GLSampler(this, desc);
   }
 
-  override createProgram(desc: ProgramDescriptor): Program {
+  protected override createProgramNative(desc: ProgramDescriptor): Program {
     return new GLProgram(this, desc);
   }
 
@@ -119,7 +119,7 @@ export class WebGL2Device extends Device {
     return new GLBindGroup(this, desc);
   }
 
-  override createRenderPipeline(desc: RenderPipelineDescriptor): RenderPipeline {
+  protected override createRenderPipelineNative(desc: RenderPipelineDescriptor): RenderPipeline {
     return new GLRenderPipeline(this, desc);
   }
 
@@ -316,7 +316,7 @@ export class WebGL2Device extends Device {
           assert(inPass, "setBindGroup 必须在 render pass 内");
           const bg = op.group as GLBindGroup | null;
           groups[op.index] = bg;
-          if (bg) this.bindGroup(bg, op.offsets);
+          if (bg) this.bindGroup(bg, op);
           break;
         }
         case "setVertexBuffer": {
@@ -412,11 +412,11 @@ export class WebGL2Device extends Device {
     }
   }
 
-  private bindGroup(bg: GLBindGroup, offsets: readonly number[] | null): void {
+  private bindGroup(bg: GLBindGroup, op: { offset0: number; offset1: number; offsetCount: number }): void {
     const gl = this.gl;
     const layout = bg.descriptor.layout as GLBindGroupLayout;
     const byBinding = new Map(bg.descriptor.entries.map((e) => [e.binding, e]));
-    // UBO（动态偏移 entry 按顺序消费 offsets；无偏移时退化为 bindBufferBase）
+    // UBO（动态偏移 entry 按顺序消费内联偏移；无偏移时退化为 bindBufferBase）
     let uboIdx = 0;
     let dynIdx = 0;
     for (const entry of layout.entries) {
@@ -426,7 +426,7 @@ export class WebGL2Device extends Device {
       if (res instanceof Buffer) {
         const glBuffer = (res as GLBuffer).glBuffer;
         const dynamic = entry.hasDynamicOffset === true;
-        const dynOffset = dynamic ? (offsets?.[dynIdx] ?? 0) : 0;
+        const dynOffset = dynamic ? (dynIdx === 0 ? op.offset0 : op.offset1) : 0;
         if (dynamic) dynIdx++;
         const base = binding?.offset ?? 0;
         if (dynamic || binding?.offset || binding?.size) {

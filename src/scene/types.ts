@@ -7,6 +7,22 @@ import type { Vec3 } from "../math/vec3.js";
 import type { Geometry } from "../render/Geometry.js";
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { LightsState } from "../render/lights/LightsState.js";
+import type { Buffer } from "../device/resources.js";
+
+/**
+ * 实例化绘制的数据源（`InstancedMesh` 实现它）。
+ *
+ * 材质实现 `drawInstanced()` 时：优先用「实例化顶点流 + 一次 draw」，
+ * 拿不到实例化管线（自定义顶点着色器）时按矩阵退化成 N 次普通绘制。
+ */
+export interface InstancedDrawSource {
+  /** 要绘制的实例数（可为 0） */
+  readonly instanceCount: number;
+  /** 实例矩阵顶点缓冲（列主序 float32x4 × 4，stride 64） */
+  readonly instanceBuffer: Buffer;
+  /** 读取第 i 个实例矩阵（退化绘制路径用） */
+  getMatrixAt(index: number, out?: Mat4): Mat4;
+}
 
 /** 材质只需满足“能用给定模型矩阵把几何体画出来” */
 export interface MaterialLike {
@@ -22,4 +38,11 @@ export interface MaterialLike {
    */
   beginFrame?(viewProjection: Mat4, cameraPos?: Vec3, lights?: LightsState): void;
   drawGeometry(pass: RenderPassEncoder, geometry: Geometry, model: Mat4): void;
+  /**
+   * 一次绘制多个实例（可选）。
+   *
+   * 实现方内部会用 `model × instanceMatrix` 作为每个实例的模型矩阵；
+   * 未实现时调用方（`SceneRenderer`）退化成 N 次 `drawGeometry`。
+   */
+  drawInstanced?(pass: RenderPassEncoder, geometry: Geometry, model: Mat4, source: InstancedDrawSource): void;
 }

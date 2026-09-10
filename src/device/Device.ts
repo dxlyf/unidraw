@@ -23,6 +23,7 @@ import {
 } from "./resources.js";
 import type { BackendKind, TextureFormat } from "../gpu/types.js";
 import type { ReadPixelsOptions } from "./readback.js";
+import { pipelineCacheKey, programCacheKey } from "./resourceCache.js";
 
 export interface DeviceInfo {
   kind: BackendKind;
@@ -62,6 +63,10 @@ export abstract class Device extends ResourceBase {
   readonly info: DeviceInfo;
   private readonly _resources: ResourceBase[] = [];
   private readonly _beforeSubmit = new Set<() => void>();
+  private readonly _programCache = new Map<string, Program>();
+  private readonly _pipelineCache = new Map<string, RenderPipeline>();
+  private _programsCreated = 0;
+  private _pipelinesCreated = 0;
   private _submitCount = 0;
 
   protected constructor(kind: BackendKind, canvas: HTMLCanvasElement | null, info: DeviceInfo) {
@@ -95,10 +100,55 @@ export abstract class Device extends ResourceBase {
   abstract createBuffer(desc: BufferDescriptor): Buffer;
   abstract createTexture(desc: TextureDescriptor): Texture;
   abstract createSampler(desc: SamplerDescriptor): Sampler;
-  abstract createProgram(desc: ProgramDescriptor): Program;
+
+  /**
+   * 创建着色器程序（**带内容缓存**）：源码完全相同的程序只创建一次。
+   *
+   * 典型场景：多个材质用同一套内置着色器（例如 25 个球各一个 `ColorMaterial`），
+   * 缓存后 GL 程序 / WGSL 模块只编译一次。
+   */
+  createProgram(desc: ProgramDescriptor): Program {
+    const key = programCacheKey(desc);
+    const cached = this._programCache.get(key);
+    if (cached && !cached.destroyed) return cached;
+    const program = this.createProgramNative(desc);
+    this._programCache.set(key, program);
+    this._programsCreated++;
+    return program;
+  }
+
   abstract createBindGroupLayout(desc: BindGroupLayoutDescriptor): BindGroupLayout;
   abstract createBindGroup(desc: BindGroupDescriptor): BindGroup;
-  abstract createRenderPipeline(desc: RenderPipelineDescriptor): RenderPipeline;
+
+  /**
+   * 创建渲染管线（**带内容缓存**）：程序 + 顶点布局 + 光栅/深度/目标/采样数
+   * 完全相同的管线只创建一次。
+   */
+  createRenderPipeline(desc: RenderPipelineDescriptor): RenderPipeline {
+    const key = pipelineCacheKey(desc, programIdOf(desc.program));
+    const cached = this._pipelineCache.get(key);
+    if (cached && !cached.destroyed) return cached;
+    const pipeline = this.createRenderPipelineNative(desc);
+    this._pipelineCache.set(key, pipeline);
+    this._pipelinesCreated++;
+    return pipeline;
+  }
+
+  /** 实际创建的着色器程序数量（去重后；调试/自检用） */
+  get programsCreated(): number {
+    return this._programsCreated;
+  }
+
+  /** 实际创建的渲染管线数量（去重后；调试/自检用） */
+  get pipelinesCreated(): number {
+    return this._pipelinesCreated;
+  }
+
+  /** @internal 由后端实现：真正创建程序（不做缓存） */
+  protected abstract createProgramNative(desc: ProgramDescriptor): Program;
+
+  /** @internal 由后端实现：真正创建管线（不做缓存） */
+  protected abstract createRenderPipelineNative(desc: RenderPipelineDescriptor): RenderPipeline;
 
   /** 创建命令编码器（与后端无关的通用实现）。 */
   createCommandEncoder(label?: string): CommandEncoder {
@@ -181,6 +231,8 @@ export abstract class Device extends ResourceBase {
     if (this.destroyed) return;
     this.markDestroyed();
     this._beforeSubmit.clear();
+    this._programCache.clear();
+    this._pipelineCache.clear();
     for (const r of this._resources) {
       if (!r.destroyed) r.destroy();
     }
@@ -190,6 +242,19 @@ export abstract class Device extends ResourceBase {
   }
 
   protected abstract override destroyNative(): void;
+}
+
+/** 每个 Program 一个稳定 id（管线指纹用它代替长源码指纹） */
+const programIds = new WeakMap<object, number>();
+let nextProgramId = 1;
+
+function programIdOf(program: object): number {
+  let id = programIds.get(program);
+  if (id === undefined) {
+    id = nextProgramId++;
+    programIds.set(program, id);
+  }
+  return id;
 }
 
 /** 打印渲染统计（提交缓冲数等）的辅助类型，保留给调试面板使用。 */

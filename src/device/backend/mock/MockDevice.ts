@@ -3,6 +3,7 @@ import { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline, Sampler, T
 import type { BindGroupDescriptor, BindGroupLayoutDescriptor, BufferDescriptor, ProgramDescriptor, RenderPipelineDescriptor, SamplerDescriptor, TextureDescriptor } from "../../descriptors.js";
 import { assert } from "../../../util/assert.js";
 import { UnidrawError } from "../../../util/assert.js";
+import { readDynamicOffsets } from "../../../command/ops.js";
 import type { CommandOp } from "../../../command/ops.js";
 import { vertexFormatInfo } from "../../../gpu/formats.js";
 import type { TextureFormat } from "../../../gpu/types.js";
@@ -48,7 +49,7 @@ export class MockDevice extends Device {
   override createSampler(desc: SamplerDescriptor): Sampler {
     return new MockSampler(this, desc);
   }
-  override createProgram(desc: ProgramDescriptor): Program {
+  protected override createProgramNative(desc: ProgramDescriptor): Program {
     return new MockProgram(this, desc);
   }
   override createBindGroupLayout(desc: BindGroupLayoutDescriptor): BindGroupLayout {
@@ -57,7 +58,7 @@ export class MockDevice extends Device {
   override createBindGroup(desc: BindGroupDescriptor): BindGroup {
     return new MockBindGroup(this, desc);
   }
-  override createRenderPipeline(desc: RenderPipelineDescriptor): RenderPipeline {
+  protected override createRenderPipelineNative(desc: RenderPipelineDescriptor): RenderPipeline {
     return new MockRenderPipeline(this, desc);
   }
 
@@ -114,6 +115,7 @@ export class MockDevice extends Device {
     let pass: PassState | null = null;
     let boundPipeline: RenderPipeline | null = null;
     const bindGroups: (BindGroup | null)[] = [null, null, null, null];
+    const bindGroupOffsets: (number[] | null)[] = [null, null, null, null];
     const vertexBuffers = new Map<number, MockVertexBufferBinding>();
     let indexBuffer: MockIndexBufferBinding | null = null;
     let viewport = { x: 0, y: 0, width: 0, height: 0 };
@@ -121,6 +123,7 @@ export class MockDevice extends Device {
     const resetPassState = () => {
       boundPipeline = null;
       bindGroups.fill(null);
+      bindGroupOffsets.fill(null);
       vertexBuffers.clear();
       indexBuffer = null;
       viewport = { x: 0, y: 0, width: 0, height: 0 };
@@ -167,6 +170,7 @@ export class MockDevice extends Device {
         case "setBindGroup":
           assert(pass, "setBindGroup 必须在 render pass 内");
           bindGroups[op.index] = op.group;
+          bindGroupOffsets[op.index] = op.offsetCount > 0 ? readDynamicOffsets(op) : null;
           break;
         case "setVertexBuffer": {
           assert(pass, "setVertexBuffer 必须在 render pass 内");
@@ -196,6 +200,7 @@ export class MockDevice extends Device {
             passIndex: this._passCount,
             pipeline: boundPipeline,
             bindGroups: [...bindGroups],
+            bindGroupOffsets: bindGroupOffsets.map((o) => (o ? [...o] : null)),
             vertexBuffers: [...vertexBuffers.values()],
             indexBuffer,
             draw: {

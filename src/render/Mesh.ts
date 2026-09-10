@@ -36,18 +36,26 @@ export class Mesh extends Node3D {
   updateWorldBounds(force = false): void {
     if (!force && this._boundsVersion === this.worldVersion) return;
     this._boundsVersion = this.worldVersion;
-    const g = this.geometry;
-    const e = this.worldMatrix.elements;
-    const c = g.boundingSphereCenter;
-    // 世界中心
-    const w = 1 / (e[3]! * c.x + e[7]! * c.y + e[11]! * c.z + e[15]!);
-    this.worldCenter.set(
-      (e[0]! * c.x + e[4]! * c.y + e[8]! * c.z + e[12]!) * w,
-      (e[1]! * c.x + e[5]! * c.y + e[9]! * c.z + e[13]!) * w,
-      (e[2]! * c.x + e[6]! * c.y + e[10]! * c.z + e[14]!) * w,
-    );
-    this.worldRadius = g.boundingSphereRadius * this.getMaxWorldScale();
+    this.applyBoundsFromLocalSphere(this.geometry.boundingSphereCenter, this.geometry.boundingSphereRadius);
   }
 
-  private _boundsVersion = -1;
+  /**
+   * 用「局部空间包围球」更新世界包围球（子类覆盖 `updateWorldBounds` 时复用）。
+   *
+   * @internal 供 `InstancedMesh` 等需要自定义包围球的子类使用
+   */
+  protected applyBoundsFromLocalSphere(center: Vec3, radius: number): void {
+    const e = this.worldMatrix.elements;
+    // 世界中心
+    const w = 1 / (e[3]! * center.x + e[7]! * center.y + e[11]! * center.z + e[15]!);
+    this.worldCenter.set(
+      (e[0]! * center.x + e[4]! * center.y + e[8]! * center.z + e[12]!) * w,
+      (e[1]! * center.x + e[5]! * center.y + e[9]! * center.z + e[13]!) * w,
+      (e[2]! * center.x + e[6]! * center.y + e[10]! * center.z + e[14]!) * w,
+    );
+    this.worldRadius = radius * this.getMaxWorldScale();
+  }
+
+  /** 包围球缓存对应的世界矩阵版本（子类可读写，用于自己的缓存判定） */
+  protected _boundsVersion = -1;
 }

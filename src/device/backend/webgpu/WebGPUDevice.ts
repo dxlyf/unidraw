@@ -4,6 +4,7 @@ import type { BindGroupDescriptor, BindGroupLayoutDescriptor, BufferDescriptor, 
 import { assert, UnidrawError } from "../../../util/assert.js";
 import { bindGroupLayoutCacheKey } from "../../descriptors.js";
 import type { CommandBuffer } from "../../../command/encoder.js";
+import { readDynamicOffsets } from "../../../command/ops.js";
 import type { CommandOp, DepthStencilAttachmentOp } from "../../../command/ops.js";
 import type { TextureFormat } from "../../../gpu/types.js";
 import { TextureUsage } from "../../../gpu/types.js";
@@ -36,6 +37,8 @@ export class WebGPUDevice extends Device {
   private _configuredW = -1;
   private _configuredH = -1;
   private readonly _layoutCache = new Map<string, WebGPUBindGroupLayout>();
+  /** 动态偏移读取的复用缓冲（避免每次 setBindGroup 分配数组） */
+  private readonly _offsetScratch: number[] = [];
   private _limits: DeviceLimits | null = null;
 
   private constructor(adapter: GPUAdapter, gpu: GPUDevice, canvas: HTMLCanvasElement, canvasFormat: GPUTextureFormat) {
@@ -103,7 +106,7 @@ export class WebGPUDevice extends Device {
   override createSampler(desc: SamplerDescriptor): Sampler {
     return new WebGPUSampler(this, desc);
   }
-  override createProgram(desc: ProgramDescriptor): Program {
+  protected override createProgramNative(desc: ProgramDescriptor): Program {
     return new WebGPUProgram(this, desc);
   }
   override createBindGroupLayout(desc: BindGroupLayoutDescriptor): BindGroupLayout {
@@ -117,7 +120,7 @@ export class WebGPUDevice extends Device {
   override createBindGroup(desc: BindGroupDescriptor): BindGroup {
     return new WebGPUBindGroup(this, desc);
   }
-  override createRenderPipeline(desc: RenderPipelineDescriptor): RenderPipeline {
+  protected override createRenderPipelineNative(desc: RenderPipelineDescriptor): RenderPipeline {
     return new WebGPURenderPipeline(this, desc);
   }
 
@@ -235,7 +238,7 @@ export class WebGPUDevice extends Device {
           assert(pass, "setBindGroup 必须在 render pass 内");
           const group = (op.group as WebGPUBindGroup | null)?.gpuBindGroup;
           if (group) {
-            if (op.offsets && op.offsets.length > 0) pass.setBindGroup(op.index, group, op.offsets as number[]);
+            if (op.offsetCount > 0) pass.setBindGroup(op.index, group, readDynamicOffsets(op, this._offsetScratch));
             else pass.setBindGroup(op.index, group);
           }
           break;
