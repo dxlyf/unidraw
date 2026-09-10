@@ -17,6 +17,7 @@ import { Scene } from "../../src/scene/index.js";
 import { Raycaster } from "../../src/interaction/Raycaster.js";
 import { InputManager } from "../../src/interaction/InputManager.js";
 import { ColorPicker } from "../../src/picking/ColorPicker.js";
+import type { MaterialLike } from "../../src/scene/types.js";
 import { Color } from "../../src/math/color.js";
 import { Vec2 } from "../../src/math/vec2.js";
 import type { Geometry as Geo } from "../../src/render/Geometry.js";
@@ -81,16 +82,33 @@ bootDemo({
     let hovered: Pickable | null = null;
     let selected: Pickable | null = null;
     const ndc = new Vec2();
-    let pickQueued = false;
     let busy = false;
+    let mismatch = 0;
+    let compared = 0;
     let lastRayText = "-";
     let lastColorText = "-";
 
-    function setHighlight(target: Pickable | null): void {
-      if (hovered === target) return;
-      if (hovered) hovered.mesh.material = hovered.material;
-      hovered = target;
-      if (hovered && hovered !== selected) hovered.mesh.material = highlight;
+    /**
+     * 高亮状态：**选中 ∪ 悬停** 都高亮。
+     * 用 Map 记住每个被接管对象的原材质，离开集合时精确恢复 —— 避免
+     * 「选中后移开鼠标高亮消失」「高亮到别的对象」这类互相覆盖的问题。
+     */
+    const taken = new Map<Mesh, MaterialLike | null>();
+    function refreshHighlight(): void {
+      const wanted = new Set<Mesh>();
+      if (selected) wanted.add(selected.mesh);
+      if (hovered) wanted.add(hovered.mesh);
+      for (const [mesh, material] of [...taken]) {
+        if (!wanted.has(mesh)) {
+          mesh.material = material;
+          taken.delete(mesh);
+        }
+      }
+      for (const mesh of wanted) {
+        if (taken.has(mesh)) continue;
+        taken.set(mesh, mesh.material);
+        mesh.material = highlight;
+      }
     }
 
     function updateHud(): void {
@@ -99,71 +117,65 @@ bootDemo({
         `selected: ${selected?.name ?? "-"}\n` +
         `ray     : ${lastRayText}\n` +
         `color   : ${lastColorText}\n` +
-        `对象数   : ${pickables.length}  ·  picker ${picker.size.width}x${picker.size.height}`;
+        `一致性   : ${compared - mismatch}/${compared} 次相同（差异 ${mismatch}）\n` +
+        `对象数   : ${pickables.length}  ·  picker ${picker.size.width}x${picker.size.height}\n` +
+        `说明     : 高亮用射线（同步、无延迟）；颜色拾取异步仅作对照`;
     }
 
-    /** 一次拾取：CPU 射线 + GPU 颜色，两条路径都跑，便于对照 */
-    async function pickAt(point: Vec2): Promise<{ ray: string | null; color: string | null; same: boolean }> {
-      // CPU：射线
-      const tRay0 = performance.now();
+    /**
+     * CPU 射线拾取（**同步**）——高亮由它驱动，因此与光标严格一致、无回读延迟。
+     */
+    function pickWithRay(point: Vec2): Pickable | null {
       raycaster.setFromCamera(ctx.camera, point.x, point.y);
       const hit = raycaster.intersectFirst(scene);
-      const rayMs = performance.now() - tRay0;
-      const rayName = hit ? (pickables.find((p) => p.mesh === hit.object)?.name ?? "floor") : null;
-
-      // GPU：颜色拾取（复用同一帧的 ID pass）
-      const tColor0 = performance.now();
-      const result = await picker.pick(scene, ctx.camera, { x: point.x, y: point.y });
-      const colorMs = performance.now() - tColor0;
-      const colorName = result.mesh ? (pickables.find((p) => p.mesh === result.mesh)?.name ?? "floor") : null;
-
-      lastRayText = `${rayName ?? "无"}  (${rayMs.toFixed(2)}ms)`;
-      lastColorText = `${colorName ?? "无"}  (${colorMs.toFixed(2)}ms, id=${result.id})`;
-      return { ray: rayName, color: colorName, same: rayName === colorName };
+      const t = performance.now();
+      const name = hit ? (pickables.find((p) => p.mesh === hit.object)?.name ?? "floor") : null;
+      lastRayText = `${name ?? "无"}  (${(performance.now() - t).toFixed(2)}ms)`;
+      return hit ? (pickables.find((p) => p.mesh === hit.object) ?? null) : null;
     }
 
-    async function processQueue(): Promise<void> {
-      if (busy) {
-        pickQueued = true;
-        return;
-      }
+    /** GPU 颜色拾取（异步）——只用于对照与统计，不参与高亮决策 */
+    async function compareWithColor(point: Vec2, rayName: string | null): Promise<void> {
+      if (busy) return;
       busy = true;
       try {
-        const res = await pickAt(ndc);
-        const target = pickables.find((p) => p.name === res.color) ?? (res.color === "floor" ? null : pickables.find((p) => p.name === res.ray) ?? null);
-        setHighlight(target);
-        if (selected) selected.mesh.material = highlight;
+        const t0 = performance.now();
+        // 每次都用当前场景/相机重绘 ID pass（refresh 默认 true），避免读到过期目标
+        const result = await picker.pick(scene, ctx.camera, { x: point.x, y: point.y });
+        const colorMs = performance.now() - t0;
+        const colorName = result.mesh ? (pickables.find((p) => p.mesh === result.mesh)?.name ?? "floor") : null;
+        lastColorText = `${colorName ?? "无"}  (${colorMs.toFixed(2)}ms, id=${result.id})`;
+        compared++;
+        if (colorName !== rayName) mismatch++;
         updateHud();
       } catch (e) {
-        hud.textContent = `pick error: ${e instanceof Error ? e.message : String(e)}`;
+        lastColorText = `error: ${e instanceof Error ? e.message : String(e)}`;
+        updateHud();
       } finally {
         busy = false;
-        if (pickQueued) {
-          pickQueued = false;
-          void processQueue();
-        }
       }
     }
 
     input.on("pointermove", (e) => {
       ndc.copy(e.ndc);
-      void processQueue();
+      // 1) 同步射线 → 立即更新高亮（与光标一致，无异步延迟）
+      hovered = pickWithRay(ndc);
+      refreshHighlight();
+      updateHud();
+      // 2) 异步颜色拾取 → 仅对照
+      void compareWithColor(ndc, hovered?.name ?? lastRayText.split(" ")[0]!);
     });
     input.on("click", (e) => {
       ndc.copy(e.ndc);
-      void (async () => {
-        const res = await pickAt(ndc);
-        const target = pickables.find((p) => p.name === res.color) ?? null;
-        if (selected && selected !== target) selected.mesh.material = selected.material;
-        selected = target;
-        if (selected) selected.mesh.material = highlight;
-        updateHud();
-      })();
+      const target = pickWithRay(ndc);
+      selected = target;
+      refreshHighlight();
+      updateHud();
     });
     input.on("keydown", (e) => {
-      if (e.code === "Escape" && selected) {
-        selected.mesh.material = selected.material;
+      if (e.code === "Escape") {
         selected = null;
+        refreshHighlight();
         updateHud();
       }
     });

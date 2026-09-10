@@ -93,9 +93,18 @@ app.use(definePlugin({
   可调 `rotateSpeed / zoomSpeed / minDistance / maxDistance / minPitch / maxPitch`；
   `dragging` / `draggedDistance` / `isClick` 供拾取逻辑区分「拖拽」与「点击」。
 - **`HighlightPlugin`**：悬停/点击高亮。
-  每帧最多拾取一次（pointermove 只标脏，`update` 里拾取），`skipWhileDragging`
-  可避免旋转相机时误选中；`hovered` / `selected` 可读，
-  `onHover` / `onSelect` 回调；恢复材质时只接管“当前高亮对象”，不影响业务替换。
+  - **选中 ∪ 悬停会同时高亮**：插件用一张 Map 记录每个被接管对象的原材质，
+    离开高亮集合时精确恢复（不会互相踩掉、也不会「选中后移开鼠标高亮消失」）；
+  - 每次拾取都用当前场景/相机重绘 ID pass（`autoInvalidate: true`，默认），
+    避免读到过期 ID 目标而高亮到错误物体；要省一次 pass 就设 `autoInvalidate: false`
+    并在场景/相机变化后调用 `invalidate()`；
+  - `skipWhileDragging: () => orbit.dragging` 可在拖动相机期间跳过拾取；
+  - `hovered` / `selected` / `highlightedCount` 可读，`clearSelection()` 清空选中，
+    `hoverAt(ndc)` / `selectAt(ndc)` 可用程序化 NDC 立即拾取（触摸或自绘 UI 场景）；
+  - `picker` 选项可换成自定义拾取来源（任何实现 `pick(scene, camera, ndc)` 的对象，
+    例如包一层 `Raycaster` 做同步拾取）；
+  - 拾取本身是异步的（一次 GPU→CPU 回读），快速移动时高亮会略滞后；
+    要零延迟就用射线驱动高亮（见 `examples/picking`）。
 
 ---
 

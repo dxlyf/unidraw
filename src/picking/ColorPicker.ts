@@ -56,7 +56,16 @@ export interface ColorPickerOptions {
 export interface ColorPickOptions {
   /** 过滤参与拾取的对象 */
   filter?: (mesh: Mesh) => boolean;
-  /** 强制重绘 ID pass（默认 false：pick 时若无有效 ID pass 会重绘；pickPixel 不会） */
+  /**
+   * 是否重绘 ID pass。
+   *
+   * 缺省 **true**（`pick` / `pickMany` 每次都用当前场景与相机重新渲染 ID pass）——
+   * 相机/物体一旦变化，复用旧的 ID 目标会读到「上一帧的对象」，
+   * 表现为 hover/点击高亮到错误物体。
+   *
+   * 只有在「场景与相机在本帧内不会变化」且需要连续查询多个点时，
+   * 才应显式传 `refresh: false`（或先手动 `render()` 再 `pickPixel()`）。
+   */
   refresh?: boolean;
 }
 
@@ -145,20 +154,29 @@ export class ColorPicker {
     return visible.length;
   }
 
-  /** 渲染（必要时）+ 读取指定 NDC 处的物体。 */
+  /**
+   * 用当前场景与相机渲染 ID pass，然后读取指定 NDC 处的物体。
+   *
+   * 默认每次都会重绘（`options.refresh !== false`）：这是最不容易用错的语义 ——
+   * ID 目标一旦过期（相机转动、物体移动/增删），复用它会拾取到错误的物体。
+   * 同一帧内查询多个点时请用 `pickMany`（一次重绘 + 一次回读）。
+   */
   async pick(scene: Node3D, camera: Camera, ndc: NdcPoint, options: ColorPickOptions = {}): Promise<ColorPickResult> {
-    if (this._dirty || options.refresh) this.render(scene, camera, options);
+    if (options.refresh !== false) this.render(scene, camera, options);
     return this.pickPixel(ndc);
   }
 
-  /** 一次回读多个 NDC 点（避免多次 GPU→CPU 往返）。 */
+  /**
+   * 一次回读多个 NDC 点（一次重绘 + 一次 GPU→CPU 往返）。
+   * 与 `pick` 相同：默认重绘 ID pass。
+   */
   async pickMany(
     scene: Node3D,
     camera: Camera,
     points: readonly NdcPoint[],
     options: ColorPickOptions = {},
   ): Promise<ColorPickResult[]> {
-    if (this._dirty || options.refresh) this.render(scene, camera, options);
+    if (options.refresh !== false) this.render(scene, camera, options);
     if (points.length === 0) return [];
     // 计算所有点的像素包围盒，一次读回整块区域
     let minX = this._width;
@@ -187,7 +205,12 @@ export class ColorPicker {
     });
   }
 
-  /** 只回读像素（要求最近一次 `render()` 的 ID pass 仍然有效）。 */
+  /**
+   * 只回读像素，**要求最近一次 `render()` / `pick()` 的 ID pass 仍然有效**。
+   *
+   * 适合：先在静止场景上 `render()`，然后连续查询多个点（或配合 `invalidate()`
+   * 手工管理失效）。场景/相机变化后必须 `render()` 或 `invalidate()`，否则会读到旧帧。
+   */
   async pickPixel(ndc: NdcPoint): Promise<ColorPickResult> {
     assert(this._color, "ColorPicker 已销毁");
     const pixel = this.ndcToPixel(ndc);

@@ -179,7 +179,8 @@ const highlightMat = new UnlitColorMaterial(app.device, new Color().setHex("#ffe
 });
 const highlight = new HighlightPlugin({
   highlight: highlightMat,
-  skipWhileDragging: () => !orbit.isClick,
+  // 拖动相机时不拾取（否则高亮会跟着旧位置闪）
+  skipWhileDragging: () => orbit.dragging,
   onSelect: (mesh) => {
     const item = items.find((it) => it.mesh === mesh);
     if (!item) return;

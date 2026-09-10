@@ -97,9 +97,22 @@ const many = await picker.pickMany(scene, camera, points);   // 一次 ID pass +
 picker.render(scene, camera);        // 手动渲染 ID pass
 await picker.pickPixel(ndc);         // 复用同一 pass 多次查询（不重绘）
 picker.resize(w, h);                 // 画布尺寸变化后调用
-picker.invalidate();                 // 场景/相机变化 → 下次 pick 重绘
+picker.invalidate();                 // 标记 ID 目标过期（配合 refresh:false / pickPixel）
 picker.dispose();
 ```
+
+**失效契约（很重要）**：
+
+| 调用 | 是否重绘 ID pass | 用途 |
+| --- | --- | --- |
+| `pick()` / `pickMany()` | **是（默认每次）** | 常规拾取；相机/物体变化后必须这样用 |
+| `pick(..., { refresh: false })` | 否 | 明确知道本帧场景与相机不变时省一次 pass |
+| `pickPixel()` | 否 | 先 `render()`，再连续查询多个点 |
+| `render()` | 是（显式） | 手动控制时机（配合 `pickPixel` / `invalidate`） |
+
+> 复用一个**过期**的 ID 目标会拾取到「上一帧那个位置上的物体」：
+> 相机一转、物体一动就会开始高亮错对象（而且 CPU 射线看起来「更准」——
+> 因为它每次都是实时计算的）。所以默认选择「每次都重绘」这个不易用错的语义。
 
 原理：
 
@@ -116,6 +129,11 @@ picker.dispose();
   变化时归零（槽位可安全复用）；
 - 回读是异步的（一次 GPU→CPU 往返）：hover/click 时拾取没问题，
   **不要每帧对每个物体拾取**；需要多个点时用 `pickMany`（一次回读）。
+
+**悬停高亮的延迟建议**：颜色拾取要等一次 GPU→CPU 回读（几百 µs ~ 数 ms），
+鼠标快速移动时高亮会略滞后于光标。需要「零延迟、与光标严格一致」的悬停反馈时，
+用**同步**的 `Raycaster` 驱动高亮，把颜色拾取留给需要像素级精确的场合
+（示例 `examples/picking` 就是这么做的：高亮走射线，颜色拾取只做对照统计）。
 
 ### 3.3 两条路径怎么选
 
