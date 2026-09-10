@@ -11,7 +11,7 @@ import type { RenderPassEncoder } from "../command/encoder.js";
 import type { CommandEncoder } from "../command/encoder.js";
 import { assert } from "../util/assert.js";
 import { clamp } from "../math/mmath.js";
-import { setLogLevel, LogLevel } from "../util/logger.js";
+import { setLogLevel, LogLevel, logger } from "../util/logger.js";
 
 export interface RendererOptions extends CreateDeviceOptions {
   /** 背景色（hex 或 Color），默认 #0e0f13 */
@@ -61,14 +61,34 @@ export class Renderer {
     return this;
   }
 
-  /** 按 CSS 尺寸 × devicePixelRatio 设置 drawing buffer。返回是否变化。 */
+  /**
+   * 按 CSS 尺寸 × devicePixelRatio 设置 drawing buffer。返回是否变化。
+   *
+   * 注意：canvas **必须有 CSS 尺寸**（例如 `width:100vw;height:100vh`）。
+   * 若没有 CSS 尺寸，canvas 的显示尺寸就等于 drawing buffer 尺寸，
+   * 此时再乘 devicePixelRatio 会让 buffer 每帧翻倍（无限增长、画面被推到视口外）；
+   * 这种情况会跳过放大并给出一次性警告。
+   */
   resizeToDisplaySize(maxPixelRatio = 2): boolean {
+    const canvas = this.canvas;
     const ratio = clamp(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, 1, maxPixelRatio);
-    const w = Math.max(1, Math.floor(this.canvas.clientWidth * ratio));
-    const h = Math.max(1, Math.floor(this.canvas.clientHeight * ratio));
-    if (this.canvas.width === w && this.canvas.height === h) return false;
-    this.canvas.width = w;
-    this.canvas.height = h;
+    const cssWidth = canvas.clientWidth || canvas.width;
+    const cssHeight = canvas.clientHeight || canvas.height;
+    const w = Math.max(1, Math.floor(cssWidth * ratio));
+    const h = Math.max(1, Math.floor(cssHeight * ratio));
+    if (canvas.width === w && canvas.height === h) return false;
+    if (ratio > 1 && cssWidth === canvas.width && cssHeight === canvas.height) {
+      // 反馈回路特征：CSS 尺寸等于当前 buffer 尺寸 → 说明没设置 CSS 尺寸
+      if (!this._warnedMissingCssSize) {
+        this._warnedMissingCssSize = true;
+        logger.warn(
+          "canvas 没有 CSS 尺寸：显示尺寸由 width/height 属性决定，已跳过 devicePixelRatio 放大（否则每帧翻倍）。请给 canvas 设置 CSS 宽高，例如 width:100vw;height:100vh。",
+        );
+      }
+      return false;
+    }
+    canvas.width = w;
+    canvas.height = h;
     return true;
   }
 
@@ -124,6 +144,7 @@ export class Renderer {
   }
 
   private _lastTime: number | undefined;
+  private _warnedMissingCssSize = false;
 
   destroy(): void {
     this.device.destroy();

@@ -136,9 +136,21 @@ app.use(definePlugin({
 
 ## 5. 陷阱
 
+- **`Camera.pitch` 为正 = 相机在目标「上方」（俯视）**：
+  `update()` 按 `eye = center + distance·(cos p·sin y, sin p, cos p·cos y)` 推导，
+  因此想让相机俯视一个放在 `y=0` 平面上的场景，`pitch` 必须取**正值**；
+  写成负值会让相机钻到地板下面，只能看到地板背面 —— 表现为「示例什么都没渲染」。
 - `App.create` 需要 `document`（示例在模块顶层 `await`）；无头/Node 场景用
   `App.fromDevice(device, canvasLike, { input: false, autoResize: false })`；
-- `app.resize(w, h)` 会直接改画布后备缓冲尺寸（像素），CSS 尺寸由页面控制；
+- **canvas 必须有 CSS 尺寸**（例如 `width:100vw;height:100vh`）。
+  没有 CSS 尺寸时 canvas 的显示尺寸等于 drawing buffer 尺寸，
+  `resizeToDisplaySize()` 再乘 devicePixelRatio 会让 buffer 每帧翻倍
+  （画面被推到视口之外）；框架已加防护（跳过放大并打印一次警告），
+  但正确做法还是给它 CSS 宽高。
+- `app.resize(w, h)` 会直接改画布后备缓冲尺寸（像素）；
+  `autoResize !== false` 时下一帧会按 CSS 尺寸自动校正回去；
 - 在 `onRender` 里不要再调用 `app.step()`；异步逻辑（拾取、加载）请 `await` 后再 `requestAnimationFrame`；
 - App 的 `sceneRenderer` 是**共享**的：插件里的自定义 pass 建议用
-  `ctx.sceneRenderer.collectVisible()` 复用剔除结果，而不是重新遍历场景。
+  `ctx.sceneRenderer.collectVisible()` 复用剔除结果，而不是重新遍历场景；
+- `SceneRenderer.render()` 会在绘制前自动把相机喂给本次用到的每个材质
+  （`MaterialLike.beginFrame`），自己组织 pass 时仍需手动调 `material.beginFrame(...)`。

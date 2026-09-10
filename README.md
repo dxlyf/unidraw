@@ -24,7 +24,7 @@
 | 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / App·插件（`node --test`，87 个用例） |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / App·插件（`node --test`，90 个用例） |
 | 示例 | 12 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**App+插件**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
@@ -36,7 +36,7 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（87 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（90 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere）到 dist-examples/

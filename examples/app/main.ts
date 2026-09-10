@@ -30,6 +30,7 @@ import {
   vec3Keys,
 } from "../../src/animation/index.js";
 import type { TextureFormat } from "../../src/gpu/types.js";
+import { TextureUsage } from "../../src/gpu/types.js";
 
 interface Item {
   mesh: Mesh;
@@ -87,6 +88,9 @@ canvas.id = "canvas";
 canvas.width = 480;
 canvas.height = 300;
 document.body.style.cssText = "margin:0;background:#0b0c10;overflow:hidden";
+// 关键：给 canvas 明确的 CSS 尺寸，否则显示尺寸跟随 drawing buffer，
+// devicePixelRatio 放大后画面会被推到视口之外（看起来“什么都没渲染”）
+canvas.style.cssText = "display:block;width:100vw;height:100vh;touch-action:none";
 document.body.appendChild(canvas);
 
 const status: { backend: string; err: string; frames: number } = { backend: "", err: "", frames: 0 };
@@ -199,12 +203,15 @@ const highlight = new HighlightPlugin({
 
 await app.useAsync(orbit);
 await app.useAsync(highlight);
-await app.useAsync(hudPlugin);
+// ?hud=0 时不注册 HUD 插件（便于只看画布 / 截图对比）
+if (params.get("hud") !== "0") await app.useAsync(hudPlugin);
 
 app.camera.setPerspective(Math.PI / 3, canvas.width / canvas.height, 0.1, 500);
 app.camera.center.set(0, 0.7, 0);
-app.camera.distance = 7.6;
-app.camera.pitch = -0.25;
+app.camera.distance = 8.2;
+// 注意：pitch 为正 = 相机在目标「上方」（俯视）；负值会让相机钻到地板下面
+app.camera.yaw = 0.35;
+app.camera.pitch = 0.34;
 app.camera.update();
 
 // ---- 自检 ----------------------------------------------------------------
@@ -232,10 +239,12 @@ async function runSelfTest(): Promise<void> {
   // 固定视角 + 固定步进，保证跨后端可比
   app.camera.center.set(0, 0.7, 0);
   app.camera.yaw = 0.3;
-  app.camera.pitch = -0.28;
+  app.camera.pitch = 0.32; // 正值 = 相机在目标上方（俯视）
   app.camera.distance = 8.4;
   app.camera.update();
   app.resize(320, 200);
+  const resizedWidth = app.stats.width;
+  const resizedHeight = app.stats.height;
 
   // 冻结动画驱动的时间：先把动作归零（保证跨后端/跨运行的数值完全一致）
   for (const a of app.mixer.actions) a.seek(0).play();
@@ -263,17 +272,59 @@ async function runSelfTest(): Promise<void> {
     if ((ray?.object ?? null) === gpu.mesh) agree++;
   }
 
+  // 离屏渲染一次，确认画面里真有东西（防止「draw 都调用了但相机没喂给材质 → 全空」）
+  const rtFormat = (app.device.canvasFormat() ?? "rgba8unorm") as TextureFormat;
+  const rtW = 160;
+  const rtH = 100;
+  const rt = app.device.createTexture({
+    label: "app-selftest-color",
+    width: rtW,
+    height: rtH,
+    format: rtFormat,
+    usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC,
+  });
+  const rtDepth = app.device.createTexture({
+    label: "app-selftest-depth",
+    width: rtW,
+    height: rtH,
+    format: "depth24plus",
+    usage: TextureUsage.RENDER_ATTACHMENT,
+  });
+  const enc = app.device.createCommandEncoder("app-selftest");
+  const rtPass = enc.beginRenderPass({
+    label: "app-selftest",
+    colorAttachments: [{ view: rt.view(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+    depthStencilAttachment: { view: rtDepth.view(), depthLoadOp: "clear", depthStoreOp: "store", depthClearValue: 1 },
+  });
+  app.sceneRenderer.render(rtPass, app.scene, app.camera);
+  rtPass.end();
+  app.device.submit([enc.finish()]);
+  const rtPixels = await app.device.readTexturePixels(rt);
+  let brightPixels = 0;
+  for (let i = 0; i < rtPixels.length; i += 4) {
+    const l = 0.2126 * rtPixels[i]! + 0.7152 * rtPixels[i + 1]! + 0.0722 * rtPixels[i + 2]!;
+    if (l > 70) brightPixels++;
+  }
+  const coverage = brightPixels / (rtPixels.length / 4);
+  rt.destroy();
+  rtDepth.destroy();
+
   const result = {
     backend: app.device.kind,
     framesBefore: before,
     steps: 30,
     dtSum: Number(dt.toFixed(4)),
+    /** resize() 后的尺寸（随后 App 会按 CSS 尺寸自动校正） */
+    resizedTo: [resizedWidth, resizedHeight],
+    /** 自动校正后的尺寸（canvas CSS 为 100vw×100vh） */
     width: app.stats.width,
     height: app.stats.height,
     objects: app.stats.objects,
     drawn: app.stats.drawn,
     culled: app.stats.culled,
     triangles: app.stats.triangles,
+    /** 离屏渲染中「物体亮度像素(L>70)」的占比：>0 说明真的画出了东西 */
+    coverage: Number(coverage.toFixed(4)),
     movedX: Number(first.mesh.position.x.toFixed(4)),
     movedY: Number(first.mesh.position.y.toFixed(4)),
     plugins: app.plugins.map((p) => p.name),
@@ -284,10 +335,12 @@ async function runSelfTest(): Promise<void> {
     // 断言
     loopOk: app.stats.frames === before + 30 && Math.abs(dt - 0.5) < 1e-6,
     sceneOk: app.stats.objects === items.length + 1 && app.stats.drawn === items.length + 1 && app.stats.culled === 0,
+    // 画面非空：相机确实喂给了材质、且物体真的被光栅化出来
+    renderOk: coverage > 0.01,
     // 曲线：0.75 →(2s, sineInOut)→ 1.5，t=0.5s 时应为 0.75 + 0.75*sineInOut(0.25) ≈ 0.8598
     animOk: Math.abs(first.mesh.position.y - 0.85983) < 5e-4,
     pluginOk: app.plugins.length === 3 && hudLines.length >= 6,
-    resizeOk: app.stats.width === 320 && app.stats.height === 200,
+    resizeOk: resizedWidth === 320 && resizedHeight === 200,
     pickOk: agree === points.length && hits > 0,
   };
   console.log("APP_SELFTEST " + JSON.stringify(result));

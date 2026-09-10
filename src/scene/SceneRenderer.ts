@@ -56,6 +56,7 @@ export class SceneRenderer {
   private readonly _items: Item[] = [];
   private readonly _sorted: Item[] = [];
   private readonly _visible: Mesh[] = [];
+  private readonly _usedMaterials: MaterialLike[] = [];
   private readonly _eye = new Vec3();
 
   /**
@@ -136,6 +137,18 @@ export class SceneRenderer {
   render(pass: RenderPassEncoder, scene: Node3D, camera: Camera, options: SceneRenderOptions = {}): void {
     const list = this._sorted;
     this.collectVisible(scene, camera, options);
+
+    // 关键：绘制前把相机喂给本次用到的每个材质（u_viewProj / u_cameraPos）。
+    // 漏掉这一步的表现是「draw 都调用了、stats 也对，但画面全空」——
+    // 因为材质的 viewProj 是零矩阵，顶点全部投影到原点。
+    const used = this._usedMaterials;
+    used.length = 0;
+    for (let i = 0; i < list.length; i++) {
+      const material = list[i]!.material;
+      if (used.indexOf(material) >= 0) continue;
+      used.push(material);
+      material.beginFrame?.(camera.viewProjection, this._eye);
+    }
 
     const stats = this.stats;
     for (let i = 0; i < list.length; i++) {

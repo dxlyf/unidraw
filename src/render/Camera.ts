@@ -5,6 +5,16 @@ import { degToRad } from "../math/mmath.js";
 /**
  * 摄像机：透视投影 + 轨道（orbit）参数。
  * 调用 update()（或直接访问 viewProjection 触发惰性更新）。
+ *
+ * 轨道约定（`update()` 的推导）：
+ * ```
+ * eye = center + distance * (cos(pitch)·sin(yaw), sin(pitch), cos(pitch)·cos(yaw))
+ * ```
+ * - **`pitch > 0` → 相机在目标「上方」（俯视）**；`pitch < 0` → 在下方（仰视）；
+ *   想从上方看一个放在 y=0 平面上的场景，pitch 必须取**正值**，
+ *   否则相机会钻到地板下面、只能看到地板背面（画面像“什么都没渲染”）。
+ * - `yaw > 0` → 相机绕 Y 轴旋转。
+ * - 由 `lookAt(eye…)` 反解的 pitch 也符合该约定（`pitch = atan2(centerY-eyeY, 水平距离)`）。
  */
 export class Camera {
   /** 垂直视场角（弧度），默认 60° */
@@ -13,7 +23,7 @@ export class Camera {
   near = 0.1;
   far = 200;
 
-  /** 轨道：绕 center 旋转 */
+  /** 轨道：绕 center 旋转。yaw 绕 Y；**pitch 为正表示相机在目标上方**。 */
   yaw = 0;
   pitch = 0;
   distance = 8;
@@ -33,14 +43,21 @@ export class Camera {
     return this;
   }
 
+  /**
+   * 用「眼睛位置 + 目标点」设置轨道参数。
+   *
+   * 与 `update()` 的推导互为逆运算（`lookAt(eye…).update()` 会回到同一个 eye）：
+   * 因此从上方看目标时 `pitch` 为**正**。
+   */
   lookAt(eyeX: number, eyeY: number, eyeZ: number, centerX = 0, centerY = 0, centerZ = 0): this {
-    const dx = centerX - eyeX;
-    const dy = centerY - eyeY;
-    const dz = centerZ - eyeZ;
+    const dx = eyeX - centerX;
+    const dy = eyeY - centerY;
+    const dz = eyeZ - centerZ;
+    const horizontal = Math.hypot(dx, dz);
     this.distance = Math.max(1e-4, Math.hypot(dx, dy, dz));
     this.center.set(centerX, centerY, centerZ);
     this.yaw = Math.atan2(dx, dz);
-    this.pitch = Math.atan2(dy, Math.hypot(dx, dz));
+    this.pitch = Math.atan2(dy, horizontal);
     this._dirty = true;
     return this;
   }

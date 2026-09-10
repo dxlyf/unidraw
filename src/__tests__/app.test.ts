@@ -9,6 +9,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMockDevice } from "../device/createDevice.js";
 import { App } from "../app/App.js";
+import { Camera } from "../render/Camera.js";
+import { Renderer } from "../render/Renderer.js";
 import { definePlugin, type Plugin } from "../app/Plugin.js";
 import { Mesh } from "../render/Mesh.js";
 import { Geometry } from "../render/Geometry.js";
@@ -18,6 +20,7 @@ import { Color } from "../math/color.js";
 import { AnimationClip } from "../animation/AnimationClip.js";
 import { nodePositionTrack, vec3Keys } from "../animation/index.js";
 import { tweenNumber } from "../animation/Tween.js";
+import type { MaterialLike } from "../scene/types.js";
 
 function fakeCanvas(width = 256, height = 128): HTMLCanvasElement {
   return {
@@ -174,6 +177,111 @@ test("App：renderScene=false 时交由 onRender 接管；raycast 可用", async
   assert.equal(app.raycast({ x: 0.99, y: 0.99 }), null);
 
   app.dispose();
+});
+
+test("SceneRenderer.render：绘制前自动把相机喂给每个材质（否则画面全空）", () => {
+  const device = createMockDevice();
+  const app = App.fromDevice(device, fakeCanvas(), { depth: false, input: false, autoResize: false, renderScene: false });
+  app.camera.center.set(0, 0, 0);
+  app.camera.distance = 6;
+  app.camera.update();
+
+  let beginFrameCalls = 0;
+  let drawCalls = 0;
+  let seenViewProjection: Float32Array | null = null;
+  const material: MaterialLike = {
+    beginFrame(viewProjection) {
+      beginFrameCalls++;
+      seenViewProjection = viewProjection.elements;
+    },
+    drawGeometry() {
+      drawCalls++;
+    },
+  };
+  // 两个 Mesh 共用一个材质实例 + 一个独立材质 → beginFrame 应只调用 2 次
+  const shared = new Mesh(Geometry.create(device, box(1, 1, 1)));
+  shared.material = material;
+  const shared2 = new Mesh(Geometry.create(device, box(1, 1, 1)));
+  shared2.material = material;
+  shared2.setPosition(2, 0, 0);
+  const other: MaterialLike = { drawGeometry: () => drawCalls++ };
+  const single = new Mesh(Geometry.create(device, box(1, 1, 1)));
+  single.material = other;
+  single.setPosition(-2, 0, 0);
+  app.scene.add(shared, shared2, single);
+
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: null });
+  app.sceneRenderer.render(pass, app.scene, app.camera);
+  pass.end();
+
+  assert.equal(drawCalls, 3, "三个 Mesh 都应绘制");
+  assert.equal(beginFrameCalls, 1, "共享材质实例只喂一次相机");
+  assert.ok(seenViewProjection, "应收到相机矩阵");
+  const vp = app.camera.viewProjection.elements;
+  for (let i = 0; i < 16; i++) {
+    assert.equal(seenViewProjection![i], vp[i], `viewProjection[${i}] 应传给材质`);
+  }
+  // 没有 beginFrame 的材质也应正常工作（接口可选）
+  assert.equal(app.sceneRenderer.stats.drawn, 3);
+  app.dispose();
+});
+
+test("Camera.pitch 约定：正值 = 相机在目标上方（负值会钻到地板下面）", () => {
+  const cam = new Camera();
+  cam.center.set(0, 0.7, 0);
+  cam.distance = 8;
+  cam.pitch = 0.3;
+  cam.update();
+  const above = cam.eyePosition;
+  assert.ok(above.y > cam.center.y, `pitch>0 时相机应在目标上方，实际 eye.y=${above.y}`);
+  assert.ok(above.y > 2.5, `eye.y 应明显高于 center，实际 ${above.y}`);
+
+  cam.pitch = -0.3;
+  cam.update();
+  const below = cam.eyePosition;
+  assert.ok(below.y < cam.center.y, `pitch<0 时相机应在目标下方（这是「钻到地板下面」的常见误用）`);
+
+  // lookAt 反解出的 pitch 也遵循同一约定：眼睛在上方 → pitch 为正
+  const cam2 = new Camera();
+  cam2.lookAt(0, 10, 0, 0, 0, 0);
+  assert.ok(cam2.pitch > 0, `lookAt 从上方看时 pitch 应为正，实际 ${cam2.pitch}`);
+  cam2.update();
+  const eye = cam2.eyePosition;
+  assert.ok(Math.abs(eye.x) < 1e-6 && Math.abs(eye.y - 10) < 1e-6 && Math.abs(eye.z) < 1e-6, `eye 应回到 (0,10,0)，实际 ${eye.y}`);
+});
+
+test("Renderer.resizeToDisplaySize：无 CSS 尺寸时不会每帧翻倍（反馈回路防护）", () => {
+  const device = createMockDevice();
+  const canvas = {
+    width: 480,
+    height: 300,
+    clientWidth: 480,
+    clientHeight: 300,
+    style: {},
+  } as unknown as HTMLCanvasElement & { clientWidth: number; clientHeight: number };
+  const renderer = Renderer.fromDevice(device, canvas, {});
+  const g = globalThis as { devicePixelRatio?: number };
+  const prev = g.devicePixelRatio;
+  g.devicePixelRatio = 2;
+  try {
+    // CSS 尺寸 == drawingBuffer 尺寸 → 说明没有 CSS 尺寸：跳过放大（否则每帧 ×2）
+    assert.equal(renderer.resizeToDisplaySize(), false);
+    assert.equal(canvas.width, 480);
+    assert.equal(canvas.height, 300);
+
+    // 有独立 CSS 尺寸 → 正常按 dpr 放大，且只放大一次
+    canvas.clientWidth = 520;
+    canvas.clientHeight = 264;
+    assert.equal(renderer.resizeToDisplaySize(), true);
+    assert.equal(canvas.width, 1040);
+    assert.equal(canvas.height, 528);
+    assert.equal(renderer.resizeToDisplaySize(), false, "尺寸已匹配时不应重复设置");
+  } finally {
+    if (prev === undefined) delete g.devicePixelRatio;
+    else g.devicePixelRatio = prev;
+    device.destroy();
+  }
 });
 
 test("App：插件异步 setup 被等待（useAsync），use 返回可链式", async () => {
