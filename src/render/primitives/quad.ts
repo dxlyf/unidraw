@@ -4,6 +4,15 @@ import type { Axis } from "./types.js";
 // ---------------------------------------------------------------------------
 // 基础：轴向面 / 立方体
 // ---------------------------------------------------------------------------
+/**
+ * 生成一个轴向面（两个三角形）并追加到 positions/normals/uvs。
+ *
+ * @param axis 面法线所在轴
+ * @param sign 面朝向（+1 / -1）
+ * @param w 面在「第一个切向轴」上的尺寸
+ * @param h 面在「第二个切向轴」上的尺寸
+ * @param axisOffset 面沿自身轴向到原点的距离（立方体=半边长；平面=0）
+ */
 export function quadFace(
   axis: Axis,
   sign: 1 | -1,
@@ -12,29 +21,31 @@ export function quadFace(
   positions: number[],
   normals: number[],
   uvs: number[],
+  axisOffset = 0,
 ): number[] {
   const halfW = w / 2;
   const halfH = h / 2;
+  const d = sign * axisOffset;
   const corners: [number, number, number][] =
     axis === "x"
       ? [
-          [0, -halfH, -halfW],
-          [0, halfH, -halfW],
-          [0, halfH, halfW],
-          [0, -halfH, halfW],
+          [d, -halfH, -halfW],
+          [d, halfH, -halfW],
+          [d, halfH, halfW],
+          [d, -halfH, halfW],
         ]
       : axis === "y"
         ? [
-            [-halfW, 0, -halfH],
-            [halfW, 0, -halfH],
-            [halfW, 0, halfH],
-            [-halfW, 0, halfH],
+            [-halfW, d, -halfH],
+            [halfW, d, -halfH],
+            [halfW, d, halfH],
+            [-halfW, d, halfH],
           ]
         : [
-            [-halfW, -halfH, 0],
-            [halfW, -halfH, 0],
-            [halfW, halfH, 0],
-            [-halfW, halfH, 0],
+            [-halfW, -halfH, d],
+            [halfW, -halfH, d],
+            [halfW, halfH, d],
+            [-halfW, halfH, d],
           ];
   const outward: [number, number, number] =
     axis === "x" ? [sign, 0, 0] : axis === "y" ? [0, sign, 0] : [0, 0, sign];

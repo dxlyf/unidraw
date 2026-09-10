@@ -31,9 +31,20 @@ export class Node3D {
   /** 世界矩阵版本号（变化时自增，供子节点/剔除缓存判断） */
   worldVersion = 0;
 
-  private _dirty = true;
+  /**
+   * TRS 是否被显式设置过（脏标记）。
+   *
+   * 初始为 false：`matrix` 是权威数据源，直接写 `matrix` / `model` 不会被覆盖。
+   * 只有调用 setPosition / setRotation / setScale / setTRS / markDirty 之后，
+   * 下一次 updateWorldMatrix 才会用 TRS 重新合成 matrix。
+   */
+  private _dirty = false;
   private readonly _snapshot = new Float32Array(16);
   private _lastParentVersion = -1;
+
+  constructor() {
+    this._snapshot.set(this.matrix.elements);
+  }
 
   /** 兼容旧 API：model 即局部矩阵 */
   get model(): Mat4 {

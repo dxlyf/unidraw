@@ -14,12 +14,16 @@
 | --- | --- |
 | 统一资源与命令 | `Buffer / Texture / Sampler / Program / RenderPipeline / BindGroup` 与 `beginRenderPass → setPipeline → setBindGroup → draw…` 全部与后端无关 |
 | 三种后端 | **WebGL2**（完整实现）、**WebGPU**（完整实现）、**Mock**（无头 CPU 后端，Node 单测用） |
-| 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包 |
+| 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包；支持**动态偏移环形 UBO**（共享材质逐物体矩阵，一次绘制换一个槽） |
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule** |
+| 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
+| 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
+| 图形拾取 | `Raycaster`（CPU 包围球→三角形精确命中，按距离排序）+ `ColorPicker`（GPU 离屏 ID pass + 像素回读，逐像素精确） |
+| 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 + **Mock 后端全流程集成测试**（`node --test`） |
-| 示例 | 9 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**与 3 个**性能档位循环**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 + **Mock 后端全流程集成测试**（`node --test`，52 个用例） |
+| 示例 | 10 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -30,7 +34,7 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（34 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（52 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run serve          # 本地静态服务 → http://localhost:8080/
@@ -84,6 +88,47 @@ WebGL2 / WebGPU 共用一套实现：
 - 每档先预热 12 帧，再取 90 帧窗口平均，右上角逐档显示 ms / fps；
 - 点击档位可手动停留，**空格**暂停/继续自动循环；
 - 渲染分辨率固定为 CSS 像素（可 `?scale=2`），保证不同档位可比。
+
+### 场景图、拾取与交互
+
+`Scene` / `Node3D` 提供层级变换（local/world 矩阵 + 脏标记），`Mesh` 组合几何与材质；
+`SceneRenderer` 负责一次自顶向下更新、视锥剔除与排序，并输出 `stats`
+（objects/drawn/culled/triangles/nodes）：
+
+```ts
+const scene = new Scene();
+const mesh = new Mesh(Geometry.create(device, box()));
+mesh.model.setIdentity().translate(0, 1, 0);
+mesh.material = new ColorMaterial(device, new Color().setHex("#4c8dff"));
+scene.add(mesh);
+
+const sceneRenderer = new SceneRenderer();
+sceneRenderer.render(pass, scene, camera);   // 内部：世界矩阵 → 剔除 → 排序 → 绘制
+```
+
+拾取有两条互补的路径（示例 `examples/picking` 同时演示并互相对照）：
+
+```ts
+// 1) CPU 几何拾取：包围球 → 三角形（Möller–Trumbore），适合 hover/精确到面
+const raycaster = new Raycaster();
+raycaster.setFromCamera(camera, ndc.x, ndc.y);
+const hit = raycaster.intersectFirst(scene);   // { object, distance, point, normal, faceIndex }
+
+// 2) GPU 颜色拾取：离屏 ID pass + 1×1 像素回读，逐像素精确（含任意遮挡/alpha 逻辑）
+const picker = new ColorPicker(device);
+const result = await picker.pick(scene, camera, { x: ndc.x, y: ndc.y });   // { mesh, id, color, pixel }
+// 多点批量（一次 ID pass + 一次回读）：await picker.pickMany(scene, camera, points)
+```
+
+`InputManager` 把浏览器事件统一成 NDC（y 向上）并合成 click/dblclick：
+
+```ts
+const input = new InputManager(canvas);
+input.on("pointermove", (e) => { picker.pick(scene, camera, e.ndc).then(/* 高亮 */); });
+input.on("click", (e) => console.log(e.ndc.x, e.ndc.y));
+```
+
+细节与性能建议见 [docs/picking.md](docs/picking.md)。
 
 ### 一个最小例子（与后端无关）
 
@@ -178,6 +223,7 @@ docs/          中文文档（见下）
 - [架构与设计](docs/architecture.md)
 - [统一绘制命令规范](docs/command-spec.md)
 - [render2d 2D 绘图模块](docs/render2d.md)
+- [场景图 / 交互 / 拾取](docs/picking.md)
 - [着色器写作指南](docs/shader-guide.md)
 - [扩展指南（新后端 / 新材质 / 新示例）](docs/extension.md)
 

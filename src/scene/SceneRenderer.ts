@@ -55,9 +55,17 @@ export class SceneRenderer {
 
   private readonly _items: Item[] = [];
   private readonly _sorted: Item[] = [];
+  private readonly _visible: Mesh[] = [];
   private readonly _eye = new Vec3();
 
-  render(pass: RenderPassEncoder, scene: Node3D, camera: Camera, options: SceneRenderOptions = {}): void {
+  /**
+   * 收集「可见（已剔除、已排序）」的 Mesh。
+   *
+   * 供自定义 pass 复用同一套 世界矩阵更新 / 视锥剔除 / 排序 结果，
+   * 例如 GPU 颜色拾取（每个物体换一个 ID 材质绘制）与阴影贴图。
+   * 返回的数组是内部复用缓冲，下一次调用即失效。
+   */
+  collectVisible(scene: Node3D, camera: Camera, options: SceneRenderOptions = {}): readonly Mesh[] {
     const stats = this.stats;
     stats.objects = 0;
     stats.drawn = 0;
@@ -119,7 +127,17 @@ export class SceneRenderer {
       });
     }
 
-    // 5) 绘制
+    const visible = this._visible;
+    visible.length = count;
+    for (let i = 0; i < count; i++) visible[i] = list[i]!.mesh;
+    return visible;
+  }
+
+  render(pass: RenderPassEncoder, scene: Node3D, camera: Camera, options: SceneRenderOptions = {}): void {
+    const list = this._sorted;
+    this.collectVisible(scene, camera, options);
+
+    const stats = this.stats;
     for (let i = 0; i < list.length; i++) {
       const it = list[i]!;
       it.material.drawGeometry(pass, it.mesh.geometry, it.mesh.worldMatrix);

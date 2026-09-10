@@ -40,6 +40,10 @@ export * from "./render2d/index.js";
 // ---- 场景图 / 交互 / 拾取 -----------------------------------------------------
 export * from "./scene/index.js";
 export * from "./interaction/index.js";
+export * from "./picking/index.js";
+
+// ---- 开源工具（回读等） -------------------------------------------------------
+export * from "./device/readback.js";
 
 // ---- 工具 -------------------------------------------------------------------
 export * from "./util/assert.js";

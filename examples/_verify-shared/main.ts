@@ -15,7 +15,6 @@ import { Camera } from "../../src/render/Camera.js";
 import { Color } from "../../src/math/color.js";
 import { TextureUsage } from "../../src/gpu/types.js";
 import { degToRad } from "../../src/math/mmath.js";
-import type { Texture } from "../../src/device/resources.js";
 import type { Device } from "../../src/device/Device.js";
 
 const W = 320;

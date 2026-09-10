@@ -1,6 +1,6 @@
 import type { Device } from "../device/Device.js";
 import type { BindGroup, BindGroupLayout, Program, RenderPipeline } from "../device/resources.js";
-import type { BindGroupEntryDescriptor } from "../device/descriptors.js";
+import type { BindGroupEntryDescriptor, BindGroupLayoutEntryDescriptor } from "../device/descriptors.js";
 import type { TextureFormat } from "../gpu/types.js";
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { Vec3 } from "../math/vec3.js";
@@ -11,6 +11,8 @@ import { assert } from "../util/assert.js";
 import type { Geometry } from "./Geometry.js";
 import { Mesh } from "./Mesh.js";
 import { CAMERA_FIELDS, MATERIAL_FIELDS, MODEL_FIELDS, STANDARD_VERTEX_STATE, defaultBlendState, defaultGroupEntries, depthFormatOf, targetFormatOf } from "./materialCommon.js";
+
+const EMPTY_OFFSETS: readonly number[] = [];
 
 export interface MaterialOptions {
   /** 颜色附件格式；缺省使用画布格式 */
@@ -52,7 +54,7 @@ export abstract class BaseMaterial {
   private _modelSlotCount: number;
   private _seenSubmitCount: number;
 
-  protected constructor(device: Device, program: Program, opts: MaterialOptions, extraLayoutEntries: { binding: number; type: "uniform-buffer" | "texture" | "sampler"; visibility: number; name?: string }[] = []) {
+  protected constructor(device: Device, program: Program, opts: MaterialOptions, extraLayoutEntries: BindGroupLayoutEntryDescriptor[] = []) {
     this.device = device;
     const targetFormat = targetFormatOf(device, opts);
     const depth = opts.depth !== false;
@@ -122,6 +124,16 @@ export abstract class BaseMaterial {
     return this;
   }
 
+  /**
+   * 子类可覆盖：写入自己的「逐绘制动态块」，返回额外的动态偏移。
+   *
+   * 返回值按 binding 升序追加在模型矩阵偏移之后（与 WebGPU 动态偏移顺序一致）。
+   * 调用时 `slot` 是本次绘制占用的环形槽序号，子类的动态块需要同容量的槽。
+   */
+  protected extraDynamicOffsets(_slot: number): readonly number[] {
+    return EMPTY_OFFSETS;
+  }
+
   /** 绘制一个 mesh。 */
   draw(pass: RenderPassEncoder, mesh: Mesh): void {
     this.drawGeometry(pass, mesh.geometry, mesh.model);
@@ -140,10 +152,11 @@ export abstract class BaseMaterial {
 
     this.modelBlock.setMat4("u_model", model);
     this.modelBlock.flushSlot(slot);
+    const extra = this.extraDynamicOffsets(slot);
 
     // 管线/绑定组状态由后端做冗余消除；这里始终记录，避免多材质交替时状态错乱
     pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup, [slot * this.modelBlock.stride]);
+    pass.setBindGroup(0, this.bindGroup, [slot * this.modelBlock.stride, ...extra]);
     pass.setVertexBuffer(0, geometry.vertexBuffer);
     if (geometry.indexFormat) {
       assert(geometry.indexBuffer, "有 indexFormat 就必须有 indexBuffer");
@@ -152,6 +165,11 @@ export abstract class BaseMaterial {
     } else {
       pass.draw(geometry.vertexCount);
     }
+  }
+
+  /** 模型矩阵环形缓冲的槽数量（子类动态块需要保持同容量）。 */
+  protected get modelSlotCount(): number {
+    return this._modelSlotCount;
   }
 
   /** 扩容模型矩阵环形缓冲（同一帧内共享材质绘制对象数超出容量时）。 */
