@@ -1,207 +1,21 @@
-/**
- * MockDevice —— 无头 CPU 后端。
- *
- * 与 WebGL2/WebGPU 共享同一套 IDevice API 与统一命令流：
- * - 资源对象保持 CPU 拷贝；
- * - submit 把命令执行在“伪帧缓冲”状态模型上；
- * - 记录每次 draw 的完整状态快照，供单元/集成测试断言；
- * - 让无浏览器/无 GPU 环境（CI、SSR、纯逻辑验证）也能跑通管线。
- */
-
-import { Device, type DeviceLimits } from "../../Device.js";
-import { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline, Sampler, Texture, TextureView } from "../../resources.js";
-import type {
-  BindGroupDescriptor,
-  BindGroupLayoutDescriptor,
-  BindGroupResource,
-  BufferDescriptor,
-  ProgramDescriptor,
-  RenderPipelineDescriptor,
-  SamplerDescriptor,
-  TextureDescriptor,
-  TextureUploadOptions,
-} from "../../descriptors.js";
+import { Device, DeviceLimits } from "../../Device.js";
+import { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline, Sampler, Texture } from "../../resources.js";
+import type { BindGroupDescriptor, BindGroupLayoutDescriptor, BufferDescriptor, ProgramDescriptor, RenderPipelineDescriptor, SamplerDescriptor, TextureDescriptor } from "../../descriptors.js";
 import { assert } from "../../../util/assert.js";
 import { UnidrawError } from "../../../util/assert.js";
 import type { CommandOp } from "../../../command/ops.js";
-import { textureFormatInfo, vertexFormatInfo } from "../../../gpu/formats.js";
-import { isDepthFormat, type IndexFormat, type TextureFormat } from "../../../gpu/types.js";
-
-export const MOCK_CANVAS_FORMAT: TextureFormat = "rgba8unorm";
-
-// ---------------------------------------------------------------------------
-// Mock 资源
-// ---------------------------------------------------------------------------
-
-class MockBuffer extends Buffer {
-  readonly data: Uint8Array;
-
-  constructor(device: MockDevice, desc: BufferDescriptor) {
-    super(desc);
-    assert(desc.size >= 0, "Buffer size 不能为负");
-    this.data = new Uint8Array(desc.size);
-    device.register(this);
-  }
-
-  override write(data: ArrayBufferView | ArrayBuffer, offset = 0): void {
-    assert(offset >= 0 && offset <= this.data.byteLength, "write offset 非法");
-    const bytes =
-      data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    assert(offset + bytes.byteLength <= this.data.byteLength, `Buffer 写入越界: offset=${offset} len=${bytes.byteLength} size=${this.size}`);
-    this.data.set(bytes, offset);
-  }
-
-  protected destroyNative(): void {}
-}
-
-class MockTexture extends Texture {
-  /** 颜色纹理的 CPU 像素；深度/浮点纹理为 null */
-  readonly pixels: Uint8Array | null;
-  readonly bpp: number;
-
-  constructor(device: MockDevice, desc: TextureDescriptor) {
-    super(desc);
-    assert(desc.width >= 1 && desc.height >= 1, "纹理尺寸必须 >=1");
-    this.bpp = textureFormatInfo(desc.format).bytesPerTexel;
-    this.pixels = isDepthFormat(desc.format) ? null : new Uint8Array(desc.width * desc.height * this.bpp);
-    device.register(this);
-  }
-
-  protected override createDefaultView(): TextureView {
-    return new MockTextureView(this);
-  }
-
-  override upload(data: ArrayBufferView, options: TextureUploadOptions = {}): void {
-    if (!this.pixels) return;
-    const x = options.x ?? 0;
-    const y = options.y ?? 0;
-    const width = options.width ?? this.width;
-    const height = options.height ?? this.height;
-    const bytesPerRow = options.bytesPerRow ?? width * this.bpp;
-    assert(width >= 1 && height >= 1 && x >= 0 && y >= 0, "upload 区域非法");
-    assert(x + width <= this.width && y + height <= this.height, "upload 区域越界");
-    const src = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    assert((height - 1) * bytesPerRow + width * this.bpp <= src.byteLength, "upload 数据长度不足");
-    for (let row = 0; row < height; row++) {
-      const srcStart = row * bytesPerRow;
-      const dstStart = ((y + row) * this.width + x) * this.bpp;
-      for (let b = 0; b < width * this.bpp; b++) {
-        this.pixels[dstStart + b] = src[srcStart + b]!;
-      }
-    }
-  }
-
-  override generateMipmaps(): void {}
-
-  protected destroyNative(): void {}
-}
-
-class MockTextureView extends TextureView {
-  constructor(texture: Texture) {
-    super(texture);
-  }
-}
-
-class MockSampler extends Sampler {
-  constructor(device: MockDevice, desc: SamplerDescriptor) {
-    super(desc);
-    device.register(this);
-  }
-  protected destroyNative(): void {}
-}
-
-class MockProgram extends Program {
-  constructor(device: MockDevice, desc: ProgramDescriptor) {
-    super(desc);
-    device.register(this);
-  }
-  protected destroyNative(): void {}
-}
-
-class MockBindGroupLayout extends BindGroupLayout {
-  constructor(device: MockDevice, desc: BindGroupLayoutDescriptor) {
-    super(desc);
-    device.register(this);
-  }
-  protected destroyNative(): void {}
-}
-
-class MockBindGroup extends BindGroup {
-  constructor(device: MockDevice, desc: BindGroupDescriptor) {
-    super(desc);
-    const byBinding = new Map(desc.layout.entries.map((e) => [e.binding, e]));
-    for (const entry of desc.entries) {
-      const layout = byBinding.get(entry.binding);
-      assert(layout, `bind group 包含布局未声明的 binding=${entry.binding}`);
-      assertResourceType(layout.type, entry.resource, entry.binding);
-    }
-    device.register(this);
-  }
-  protected destroyNative(): void {}
-}
-
-function assertResourceType(type: "uniform-buffer" | "texture" | "sampler", resource: BindGroupResource, binding: number): void {
-  if (type === "uniform-buffer") assert(resource instanceof Buffer, `binding ${binding} 应为 Buffer（uniform）`);
-  else if (type === "sampler") assert(resource instanceof Sampler, `binding ${binding} 应为 Sampler`);
-  else assert(resource instanceof TextureView, `binding ${binding} 应为 TextureView`);
-}
-
-class MockRenderPipeline extends RenderPipeline {
-  constructor(device: MockDevice, desc: RenderPipelineDescriptor) {
-    super(desc);
-    assert(desc.program.supportsWebGL2 || desc.program.supportsWebGPU, "program 需要至少一种后端源码");
-    assert(desc.targets.length >= 1, "pipeline 至少需要一个 color target");
-    device.register(this);
-  }
-  protected destroyNative(): void {}
-}
-
-// ---------------------------------------------------------------------------
-// Draw 记录
-// ---------------------------------------------------------------------------
-
-export interface MockVertexBufferBinding {
-  slot: number;
-  buffer: Buffer;
-  offset: number;
-}
-
-export interface MockIndexBufferBinding {
-  buffer: Buffer;
-  format: IndexFormat;
-  offset: number;
-}
-
-export interface MockDrawCall {
-  kind: "draw" | "drawIndexed";
-  passIndex: number;
-  pipeline: RenderPipeline;
-  bindGroups: (BindGroup | null)[];
-  vertexBuffers: MockVertexBufferBinding[];
-  indexBuffer: MockIndexBufferBinding | null;
-  draw: {
-    vertexCount?: number;
-    /** drawIndexed 的索引数 */
-    indexCount?: number;
-    instanceCount: number;
-    firstVertex: number;
-    firstIndex: number;
-    baseVertex: number;
-    firstInstance: number;
-  };
-  viewport: { x: number; y: number; width: number; height: number };
-  scissor: { x: number; y: number; width: number; height: number } | null;
-}
-
-// ---------------------------------------------------------------------------
-// MockDevice
-// ---------------------------------------------------------------------------
-
-interface PassState {
-  colorFormats: (TextureFormat | null)[];
-  width: number;
-  height: number;
-}
+import { vertexFormatInfo } from "../../../gpu/formats.js";
+import type { TextureFormat } from "../../../gpu/types.js";
+import type { MockDrawCall, MockIndexBufferBinding, MockVertexBufferBinding, PassState } from "./types.js";
+import { MOCK_CANVAS_FORMAT } from "./constants.js";
+import { MockBindGroup } from "./resources/MockBindGroup.js";
+import { MockBindGroupLayout } from "./resources/MockBindGroupLayout.js";
+import { MockBuffer } from "./resources/MockBuffer.js";
+import { MockProgram } from "./resources/MockProgram.js";
+import { MockRenderPipeline } from "./resources/MockRenderPipeline.js";
+import { MockSampler } from "./resources/MockSampler.js";
+import { MockTexture } from "./resources/MockTexture.js";
+import { clampByte } from "./gpuUtils.js";
 
 export class MockDevice extends Device {
   private _drawCalls: MockDrawCall[] = [];
@@ -425,6 +239,6 @@ export class MockDevice extends Device {
   protected destroyNative(): void {}
 }
 
-function clampByte(v: number): number {
-  return Math.max(0, Math.min(255, Math.round(v * 255)));
-}
+// 保持模块公共入口不变（测试等仍可从本文件导入这些符号）
+export { MOCK_CANVAS_FORMAT } from "./constants.js";
+export type { MockDrawCall, MockIndexBufferBinding, MockVertexBufferBinding } from "./types.js";

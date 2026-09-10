@@ -37,6 +37,10 @@ export * from "./render/Renderer.js";
 // ---- 2D 渲染层 ---------------------------------------------------------------
 export * from "./render2d/index.js";
 
+// ---- 场景图 / 交互 / 拾取 -----------------------------------------------------
+export * from "./scene/index.js";
+export * from "./interaction/index.js";
+
 // ---- 工具 -------------------------------------------------------------------
 export * from "./util/assert.js";
 export * from "./util/logger.js";

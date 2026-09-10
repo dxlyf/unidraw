@@ -1,0 +1,52 @@
+
+// ---------------------------------------------------------------------------
+// 纹理材质片元
+// ---------------------------------------------------------------------------
+export const TEXTURE_FRAGMENT_GLSL = `#version 300 es
+precision highp float;
+
+layout(std140) uniform MaterialBlock {
+  vec4 u_color;
+};
+uniform sampler2D u_albedo;
+
+in vec3 v_worldPos;
+in vec3 v_normal;
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  vec4 albedo = texture(u_albedo, v_uv) * u_color;
+  vec3 n = normalize(v_normal);
+  vec3 lightDir = normalize(vec3(0.35, 0.75, 0.55));
+  float ndl = max(dot(n, lightDir), 0.0);
+  vec3 color = albedo.rgb * (0.35 + 0.65 * ndl);
+  fragColor = vec4(color, albedo.a);
+}
+`;
+
+export const TEXTURE_FRAGMENT_WGSL = `
+struct MaterialBlock {
+  u_color : vec4f,
+};
+@group(0) @binding(2) var<uniform> material : MaterialBlock;
+@group(0) @binding(3) var u_albedo : texture_2d<f32>;
+@group(0) @binding(4) var u_albedoSampler : sampler;
+
+struct FSIn {
+  @builtin(position) clip_pos : vec4f,
+  @location(0) v_worldPos : vec3f,
+  @location(1) v_normal : vec3f,
+  @location(2) v_uv : vec2f,
+};
+
+@fragment
+fn fs_main(in : FSIn) -> @location(0) vec4f {
+  let albedo = textureSample(u_albedo, u_albedoSampler, in.v_uv) * material.u_color;
+  let n = normalize(in.v_normal);
+  let lightDir = normalize(vec3f(0.35, 0.75, 0.55));
+  let ndl = max(dot(n, lightDir), 0.0);
+  let color = albedo.rgb * (0.35 + 0.65 * ndl);
+  return vec4f(color, albedo.a);
+}
+`;

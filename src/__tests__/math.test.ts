@@ -46,11 +46,24 @@ test("mat4 lookAt moves target to -Z axis", () => {
   assert.ok(Math.abs(c.z + distance) < 1e-4, `center 应位于 -distance，实际 z=${c.z}，distance=${distance}`);
 });
 
-test("mat4 perspective maps near plane", () => {
+test("mat4 perspective maps near/far planes (ZO 约定: NDC z ∈ [0,1])", () => {
   const p = Mat4.perspective(degToRad(60), 1, 0.1, 100);
-  const pt = new Vec3(0, 0, -0.1).applyMat4(p);
+  const near = new Vec3(0, 0, -0.1).applyMat4(p);
+  const far = new Vec3(0, 0, -100).applyMat4(p);
   // applyMat4 已执行透视除法，z 即 NDC z
-  assert.ok(Math.abs(pt.z + 1) < 1e-4, `near 平面 NDC z 应为 -1，实际 ${pt.z}`);
+  assert.ok(Math.abs(near.z - 0) < 1e-4, `near 平面 NDC z 应为 0，实际 ${near.z}`);
+  assert.ok(Math.abs(far.z - 1) < 1e-4, `far 平面 NDC z 应为 1，实际 ${far.z}`);
+  // 距相机越远 z 越大（单调递增，深度测试方向正确）
+  const mid = new Vec3(0, 0, -10).applyMat4(p);
+  assert.ok(near.z < mid.z && mid.z < far.z, `z 应随距离单调递增，实际 ${near.z} / ${mid.z} / ${far.z}`);
+});
+
+test("mat4 perspectiveGL 保留 GL 约定 (NDC z ∈ [-1,1])", () => {
+  const p = Mat4.perspectiveGL(degToRad(60), 1, 0.1, 100);
+  const near = new Vec3(0, 0, -0.1).applyMat4(p);
+  const far = new Vec3(0, 0, -100).applyMat4(p);
+  assert.ok(Math.abs(near.z + 1) < 1e-4, `near 平面 NDC z 应为 -1，实际 ${near.z}`);
+  assert.ok(Math.abs(far.z - 1) < 1e-4, `far 平面 NDC z 应为 1，实际 ${far.z}`);
 });
 
 test("vec3 dot/cross", () => {

@@ -51,11 +51,18 @@ export class Camera {
     const eyeX = this.center.x + this.distance * cp * Math.sin(this.yaw);
     const eyeY = this.center.y + this.distance * Math.sin(this.pitch);
     const eyeZ = this.center.z + this.distance * cp * Math.cos(this.yaw);
+    this._eyeX = eyeX;
+    this._eyeY = eyeY;
+    this._eyeZ = eyeZ;
     this._view = Mat4.lookAt(eyeX, eyeY, eyeZ, this.center.x, this.center.y, this.center.z);
     this._projection = Mat4.perspective(this.fovY, this.aspect, this.near, this.far);
     this._viewProjection = Mat4.multiply(this._projection, this._view);
     this._dirty = false;
   }
+
+  private _eyeX = 0;
+  private _eyeY = 0;
+  private _eyeZ = 1;
 
   get view(): Mat4 {
     if (this._dirty) this.update();
@@ -73,10 +80,13 @@ export class Camera {
     return this._viewProjection;
   }
 
+  /** 相机世界位置（非分配版本，供渲染器/拾取逐帧调用） */
+  getEyePosition(out = new Vec3()): Vec3 {
+    if (this._dirty) this.update();
+    return out.set(this._eyeX, this._eyeY, this._eyeZ);
+  }
+
   get eyePosition(): Vec3 {
-    this.update();
-    const inv = new Mat4().copy(this._view);
-    inv.invert();
-    return new Vec3(inv.elements[12]!, inv.elements[13]!, inv.elements[14]!);
+    return this.getEyePosition();
   }
 }

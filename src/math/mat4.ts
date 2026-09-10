@@ -198,9 +198,30 @@ export class Mat4 {
     return out;
   }
 
+  /**
+   * 右手系透视投影，NDC 深度约定 **z ∈ [0, 1]**（WebGPU/D3D 风格，Zero-to-One）。
+   *
+   * 为什么用 ZO：WebGPU 只接受 z∈[0,1]，而 WebGL2 接受 z∈[-1,1]（[0,1] 是其子集），
+   * 因此同一矩阵在两种后端都正确；GL 风格（z∈[-1,1]）在 WebGPU 上会把近平面到
+   * 中段的深度裁掉。需要 GL 约定时用 `perspectiveGL`。
+   */
   static perspective(fovYRad: number, aspect: number, near: number, far: number): Mat4 {
     assertFinite(fovYRad, "fovY");
     assertFinite(aspect, "aspect");
+    const out = new Mat4();
+    const e = out.elements;
+    const f = 1 / Math.tan(clamp(fovYRad, 1e-4, Math.PI - 1e-4) / 2);
+    e.fill(0);
+    e[0] = f / aspect;
+    e[5] = f;
+    e[10] = far / (near - far);
+    e[11] = -1;
+    e[14] = (far * near) / (near - far);
+    return out;
+  }
+
+  /** OpenGL 风格透视（NDC 深度 z ∈ [-1, 1]）；仅在与自定义 GL 管线对接时使用 */
+  static perspectiveGL(fovYRad: number, aspect: number, near: number, far: number): Mat4 {
     const out = new Mat4();
     const e = out.elements;
     const f = 1 / Math.tan(clamp(fovYRad, 1e-4, Math.PI - 1e-4) / 2);

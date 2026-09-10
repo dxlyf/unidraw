@@ -132,18 +132,33 @@ frame();
 src/
   math/        vec2/3/4、Color、Mat4、工具
   gpu/         types（统一枚举）、formats（顶点/纹理格式表）、std140 布局引擎
-  device/      Device 抽象、资源句柄、descriptors、createDevice 工厂
+  device/      Device 抽象、descriptors、createDevice 工厂
+    resource/  一个类一个文件（ResourceBase/Buffer/Texture/TextureView/Sampler/
+               Program/BindGroupLayout/BindGroup/RenderPipeline）
+    resources.ts  barrel：保持 `device/resources.js` 导入路径不变
     backend/   webgl2 / webgpu / mock（无头）
-  command/     ops.ts（统一命令）、encoder.ts（CommandEncoder/RenderPassEncoder/CommandBuffer）
-  render/      Geometry/primitives、UniformBlock、material（内置材质）、texture、
-               Mesh、Camera、Renderer 门面、shaders（GLSL+WGSL）
+               constants.ts + gpuUtils.ts + resources/<每类一个文件> + <Backend>Device.ts
+  command/     ops.ts（统一命令）、CommandBuffer / RenderPassEncoder / CommandEncoder
+               （encoder.ts 为 barrel，保持 `command/encoder.js` 不变）
+  render/      Camera、Geometry、Mesh、UniformBlock、Renderer 门面
+    material.ts / shaders.ts / primitives.ts / texture.ts 均为 barrel；
+    实现按「一个类/一个几何体/一份材质一个文件」放在同目录或子目录
+    （materialCommon.ts、shaders/*、primitives/*、texture/*）
   render2d/    Canvas2D 完整 2D：路径/贝塞尔/arc/圆角矩形、填充描边、渐变、
                变换、文本、裁剪（WebGL2/WebGPU 共用）
+               path.ts / style.ts / renderer2d.ts 为 barrel，实现拆到
+               Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
+               RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
 examples/      9 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
+
+> 约定：**一个文件一个类/一个职责**，跨模块引用一律走同名 barrel
+> （`device/resources.js`、`command/encoder.js`、`render/material.js`、
+> `render/shaders.js`、`render/primitives.js`、`render2d/path.js` …），
+> 因此重构文件布局不会影响使用方导入路径。
 
 ---
 

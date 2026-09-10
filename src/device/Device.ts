@@ -130,7 +130,7 @@ export abstract class Device extends ResourceBase {
     logger.info(`device "${this.info.name}" 已销毁`);
   }
 
-  protected abstract destroyNative(): void;
+  protected abstract override destroyNative(): void;
 }
 
 /** 打印渲染统计（提交缓冲数等）的辅助类型，保留给调试面板使用。 */
