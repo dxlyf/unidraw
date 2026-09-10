@@ -5,19 +5,32 @@
 ## 1. 分层
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  render/   Geometry·primitives·material·texture·    │  易用层
-│            Camera·Mesh·Renderer·UniformBlock        │  （内置材质=约定）
-├─────────────────────────────────────────────────────┤
-│  command/  ops·CommandEncoder·RenderPassEncoder·    │  统一命令层
-│            CommandBuffer                            │  （与后端无关）
-├─────────────────────────────────────────────────────┤
-│  device/   Device 抽象 + 资源句柄 + descriptors      │  资源抽象层
-├──────────────────┬────────────────┬─────────────────┤
-│  backend/webgl2  │ backend/webgpu │ backend/mock    │  后端翻译层
-│  同步 GL2 实现    │ WebGPU 实现      │ 无头 CPU 实现   │
-└──────────────────┴────────────────┴─────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  app/      App 门面 + Plugin 生命周期 + 内置插件               │  应用层
+│            （OrbitControls / Highlight）                      │  （单循环 step）
+├──────────────────────────────────────────────────────────────┤
+│  scene/    Node3D·Scene·Mesh·SceneRenderer·Frustum            │  场景层
+│  interaction/  InputManager·Ray·Raycaster                     │  （层级/剔除/拾取）
+│  picking/  ColorPicker·IdMaterial（GPU 颜色拾取）              │
+│  animation/ KeyframeTrack·AnimationClip·Mixer·Tween·Easing    │
+├──────────────────────────────────────────────────────────────┤
+│  render/   Geometry·primitives·material·texture·              │  易用层
+│            Camera·Mesh·Renderer·UniformBlock                  │  （内置材质=约定）
+│  render2d/ Canvas2D（路径/填充/文本/裁剪）                     │
+├──────────────────────────────────────────────────────────────┤
+│  command/  ops·CommandEncoder·RenderPassEncoder·              │  统一命令层
+│            CommandBuffer                                      │  （与后端无关）
+├──────────────────────────────────────────────────────────────┤
+│  device/   Device 抽象 + 资源句柄 + descriptors + 回读         │  资源抽象层
+├──────────────────┬────────────────┬──────────────────────────┤
+│  backend/webgl2  │ backend/webgpu │ backend/mock             │  后端翻译层
+│  同步 GL2 实现    │ WebGPU 实现      │ 无头 CPU 实现            │
+└──────────────────┴────────────────┴──────────────────────────┘
 ```
+
+> 约定：**一个文件一个类/一个职责**；模块入口用同名 barrel 保持导入路径稳定
+> （`device/resources.ts`、`command/encoder.ts`、`render/{material,shaders,primitives,texture}.ts`、
+> `render2d/{path,style,renderer2d}.ts`、`scene/index.ts`、`animation/index.ts`、`app/index.ts`）。
 
 ### 数学库 `math/`
 纯 TypeScript、零依赖。`Mat4` 为列主序（与着色器一致），方法就地修改并返回
@@ -126,6 +139,19 @@ binding 编号直接对应 WGSL `@group(g) @binding(b)`。
   格式 `depth24plus`）。
 - 离屏渲染：传入显式深度纹理（`device.createTexture({format:"depth24plus",
   usage:RENDER_ATTACHMENT})`）。
+
+### 6.1 投影矩阵使用 ZO 约定（NDC z ∈ [0,1]）
+
+- `Mat4.perspective()` 输出 **ZO**（zero-to-one）投影：近平面 → `z=0`，远平面 → `z=1`，
+  这是 WebGPU 的裁剪空间约定；
+- `Mat4.perspectiveGL()` 保留 OpenGL 的 `z ∈ [-1,1]`（仅在需要与 GL 旧代码/工具对接时使用）；
+- 为什么统一用 ZO：若给 WebGPU 传 GL 风格的投影，深度值会落在 `[-1,1]`，
+  被裁剪到 `[0,1]` 后**损失一半精度**，并且近平面之前的几何不再被裁掉 —— 表现为
+  深度冲突/穿透。反过来 ZO 投影在 WebGL2 上完全合法（`z<0` 的部分本来就位于近平面之前）；
+- `Frustum.setFromProjectionMatrix(m, zZeroToOne = true)` 与投影约定配套
+  （`zZeroToOne=false` 时按 GL 方式提取近平面），因此视锥剔除与深度测试一致；
+- 单元测试覆盖两种约定：`mat4 perspective maps near/far planes (ZO)` 与
+  `mat4 perspectiveGL 保留 GL 约定`。
 
 ## 7. 纹理上传
 
