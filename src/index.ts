@@ -42,6 +42,9 @@ export * from "./scene/index.js";
 export * from "./interaction/index.js";
 export * from "./picking/index.js";
 
+// ---- 动画 -------------------------------------------------------------------
+export * from "./animation/index.js";
+
 // ---- 开源工具（回读等） -------------------------------------------------------
 export * from "./device/readback.js";
 

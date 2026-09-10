@@ -20,10 +20,11 @@
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
 | 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
 | 图形拾取 | `Raycaster`（CPU 包围球→三角形精确命中，按距离排序）+ `ColorPicker`（GPU 离屏 ID pass + 像素回读，逐像素精确） |
+| 动画 | `KeyframeTrack`（数值/Vec3/颜色/**自定义绑定**）、`AnimationClip` + `AnimationMixer`/`AnimationAction`（播放/暂停/循环/**时间缩放**/淡入淡出）、`Tween`（`tweenNumber/tweenVec3/tweenColor/tweenObject` + `TweenManager`）、`Easing`（quad/cubic/sine/expo/back/elastic） |
 | 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 + **Mock 后端全流程集成测试**（`node --test`，52 个用例） |
-| 示例 | 10 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**与 3 个**性能档位循环**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 + **Mock 后端全流程集成测试**（`node --test`，74 个用例） |
+| 示例 | 11 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -34,7 +35,7 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（52 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（74 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run serve          # 本地静态服务 → http://localhost:8080/
@@ -130,6 +131,35 @@ input.on("click", (e) => console.log(e.ndc.x, e.ndc.y));
 
 细节与性能建议见 [docs/picking.md](docs/picking.md)。
 
+### 动画（`src/animation`）
+
+```ts
+// 1) 关键帧轨道（自定义绑定：任何 (value) => void 都能被驱动）
+const hop = new AnimationClip("hop", { duration: 1 }).addTracks(
+  nodePositionTrack(mesh, vec3Keys([
+    { time: 0,   value: [0, 0, 0], easing: "quadOut" },
+    { time: 0.5, value: [0, 2, 0], easing: "quadIn" },
+    { time: 1,   value: [0, 0, 0] },
+  ])),
+  materialColorTrack(material, colorKeys([{ time: 0, value: "#4c8dff" }, { time: 1, value: "#ff5c8a" }])),
+);
+
+// 2) 播放（循环 / 时间缩放 / 淡入淡出）
+const mixer = new AnimationMixer(scene);
+mixer.play(hop, { loop: "ping-pong" });
+mixer.timeScale = 0.5;
+mixer.update(dt);                      // 每帧
+
+// 3) Tween：一次性的小动效
+const tweens = new TweenManager();
+tweens.add(tweenNumber(0, 1, 0.3, (v) => panel.setOpacity(v), { easing: "backOut" }));
+tweens.add(tweenObject(mesh.scale, { x: 1.6, y: 1.6, z: 1.6 }, 0.2, { yoyo: true, repeat: 1, markDirty: true }));
+tweens.update(dt);
+```
+
+示例 `examples/animation` 同时演示层级动画（父节点旋转带动子树）、关键帧、Mixer 与 Tween，
+并可用键盘切换循环模式与时间缩放。详见 [docs/animation.md](docs/animation.md)。
+
 ### 一个最小例子（与后端无关）
 
 ```ts
@@ -195,7 +225,7 @@ src/
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      9 个示例 + common/（demo 引导、bench 测量框架）
+examples/      11 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -224,6 +254,7 @@ docs/          中文文档（见下）
 - [统一绘制命令规范](docs/command-spec.md)
 - [render2d 2D 绘图模块](docs/render2d.md)
 - [场景图 / 交互 / 拾取](docs/picking.md)
+- [动画（关键帧 · Mixer · Tween）](docs/animation.md)
 - [着色器写作指南](docs/shader-guide.md)
 - [扩展指南（新后端 / 新材质 / 新示例）](docs/extension.md)
 

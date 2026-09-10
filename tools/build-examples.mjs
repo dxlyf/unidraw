@@ -18,6 +18,7 @@ const demos = [
   { name: "shapes2d", title: "2D 绘制 · 矩形/线/圆/椭圆/多边形" },
   { name: "shapes3d", title: "3D · 材质与几何画廊" },
   { name: "picking", title: "拾取 · 射线几何命中 + GPU 颜色拾取" },
+  { name: "animation", title: "动画 · 关键帧 / Mixer / Tween" },
   { name: "perf-drawcalls", title: "性能 · draw call 压力（500→6000 draws）" },
   { name: "perf-instanced", title: "性能 · 实例化压力（4k→262k）" },
   { name: "perf-triangles", title: "性能 · 三角形吞吐" },
