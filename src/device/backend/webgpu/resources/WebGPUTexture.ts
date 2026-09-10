@@ -2,6 +2,7 @@ import { Texture, TextureView } from "../../../resources.js";
 import type { TextureDescriptor, TextureUploadOptions } from "../../../descriptors.js";
 import { assert } from "../../../../util/assert.js";
 import { textureFormatInfo } from "../../../../gpu/formats.js";
+import { TextureUsage } from "../../../../gpu/types.js";
 import { WebGPUDevice } from "../WebGPUDevice.js";
 import { WebGPUTextureView } from "./WebGPUTextureView.js";
 import { mapUsage } from "../gpuUtils.js";
@@ -13,12 +14,21 @@ export class WebGPUTexture extends Texture {
   constructor(device: WebGPUDevice, desc: TextureDescriptor) {
     super(desc);
     this._device = device;
+    const sampleCount = Math.max(1, Math.floor(desc.sampleCount ?? 1));
+    if (sampleCount > 1) {
+      assert(desc.mipLevelCount === undefined || desc.mipLevelCount <= 1, "多采样纹理不能有 mip 链");
+      assert(
+        (desc.usage & (TextureUsage.TEXTURE_BINDING | TextureUsage.STORAGE_BINDING | TextureUsage.COPY_SRC)) === 0,
+        "多采样纹理不能采样/拷贝，只能作为渲染附件（渲染结果请用 resolveTo 解析到普通纹理）",
+      );
+    }
     this.gpuTexture = device.gpu.createTexture({
       label: desc.label,
       size: { width: desc.width, height: desc.height },
       format: desc.format as GPUTextureFormat,
       usage: mapUsage(desc.usage),
       mipLevelCount: desc.mipLevelCount ?? 1,
+      sampleCount,
     });
     device.register(this);
   }

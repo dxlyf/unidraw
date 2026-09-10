@@ -29,6 +29,8 @@ export * from "./render/primitives.js";
 export * from "./render/UniformBlock.js";
 export * from "./render/material.js";
 export * from "./render/lights/index.js";
+export * from "./render/RenderTarget.js";
+export * from "./render/postfx/index.js";
 export * from "./render/Mesh.js";
 export * from "./render/texture.js";
 export * from "./render/Camera.js";

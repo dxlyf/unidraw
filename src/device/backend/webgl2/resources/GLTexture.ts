@@ -13,14 +13,22 @@ export class GLTexture extends Texture {
   readonly glTexture: WebGLTexture;
   readonly gl: GL;
   readonly id: number = nextId();
+  /** 采样数（>1 时用多重采样 renderbuffer 作为附件，本对象只是标识/句柄） */
+  readonly sampleCount: number;
 
   constructor(device: WebGL2Device, desc: TextureDescriptor) {
     super(desc);
     assert(desc.width >= 1 && desc.height >= 1, "纹理尺寸必须 >=1");
     this.gl = device.gl;
+    this.sampleCount = Math.max(1, Math.floor(desc.sampleCount ?? 1));
     const tex = this.gl.createTexture();
     assert(tex, "createTexture 失败");
     this.glTexture = tex;
+    if (this.sampleCount > 1) {
+      // 多采样附件：真正的存储由 WebGL2Device 的 renderbuffer 缓存提供
+      device.register(this);
+      return;
+    }
     this.bindScratch();
     const params = textureGLParams(this.gl, desc.format);
     if (GLTexture.isDepthFormatLocal(desc.format)) {

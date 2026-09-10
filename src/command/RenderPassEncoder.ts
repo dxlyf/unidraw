@@ -22,10 +22,13 @@ export class RenderPassEncoder {
   /** 是否启用冗余去重（默认开；关掉可得到「每次调用都记录」的完整命令流） */
   dedupe = true;
   readonly label: string | undefined;
+  /** 本 pass 附件的采样数（材质据此选择匹配管线；WebGPU 校验要求一致） */
+  readonly sampleCount: number;
 
-  constructor(ops: CommandOp[], label: string | undefined, onEnd: () => void) {
+  constructor(ops: CommandOp[], label: string | undefined, sampleCount: number, onEnd: () => void) {
     this._ops = ops;
     this.label = label;
+    this.sampleCount = sampleCount;
     this._onEnd = onEnd;
   }
 

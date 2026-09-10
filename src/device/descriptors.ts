@@ -41,6 +41,15 @@ export interface TextureDescriptor {
   format: TextureFormat;
   usage: TextureUsageFlags;
   mipLevelCount?: number;
+  /**
+   * 采样数（MSAA）：1 = 普通纹理（默认）。
+   *
+   * - 多采样纹理只能作为渲染附件，不能采样；渲染结果需要 `resolveTo` 到一张普通纹理
+   *   （见 `RenderTarget`，它会把两者一起管好）；
+   * - WebGL2 用多重采样 renderbuffer 实现（纹理句柄仅作标识）；
+   * - 上限由 `device.limits.maxSamples` 给出。
+   */
+  sampleCount?: number;
 }
 
 export interface TextureUploadOptions {
@@ -195,6 +204,11 @@ export interface RenderPipelineDescriptor {
   depthStencil?: DepthStencilStateDescriptor | null;
   /** 每个颜色附件一个 target；格式必须与实际附件匹配 */
   targets: ColorTargetDescriptor[];
+  /**
+   * 多重采样状态（WebGPU 需要与附件 `sampleCount` 一致；WebGL2/Mock 忽略，
+   * 因为多重采样在那里是 framebuffer 的属性）。
+   */
+  multisample?: { count: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +264,10 @@ export interface RenderPassColorAttachmentDescriptor {
   clearValue?: ColorClearValue;
   loadOp?: LoadOp;
   storeOp?: StoreOp;
+  /** MSAA 解析目标（`view` 为多采样附件时必填，否则结果不可采样） */
+  resolveTo?: TextureView | null;
+  /** 附件采样数（默认 1；由 `RenderTarget.colorAttachment()` 自动填好） */
+  sampleCount?: number;
 }
 
 export interface RenderPassDepthStencilAttachmentDescriptor {
@@ -258,6 +276,8 @@ export interface RenderPassDepthStencilAttachmentDescriptor {
   depthLoadOp?: LoadOp;
   depthStoreOp?: StoreOp;
   depthClearValue?: number;
+  /** 深度附件采样数（MSAA 时必须与颜色附件一致） */
+  sampleCount?: number;
 }
 
 export interface RenderPassDescriptor {

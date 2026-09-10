@@ -15,6 +15,13 @@ export interface ColorAttachmentOp {
   loadOp: LoadOp;
   storeOp: StoreOp;
   clearValue?: ColorClearValue;
+  /**
+   * MSAA 解析目标：`view` 是多采样附件时把结果解析到这张（可采样的）视图。
+   * WebGPU 映射到 `resolveTarget`；WebGL2 在 pass 结束时 `blitFramebuffer` 解析。
+   */
+  resolveTo?: TextureView | null;
+  /** 附件采样数（1 = 不 MSAA）。WebGL2 会用多重采样 renderbuffer 实现。 */
+  sampleCount?: number;
 }
 
 export interface DepthStencilAttachmentOp {
@@ -22,6 +29,8 @@ export interface DepthStencilAttachmentOp {
   depthLoadOp: LoadOp;
   depthStoreOp: StoreOp;
   depthClearValue?: number;
+  /** 深度附件采样数（MSAA 时必须与颜色附件一致） */
+  sampleCount?: number;
 }
 
 export type CommandOp =

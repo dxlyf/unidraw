@@ -30,7 +30,8 @@ const demos = [
   { name: "animation", title: "动画 · 关键帧 / Mixer / Tween" },
   { name: "app", title: "应用 · App 门面 + 插件（轨道相机/拾取高亮/HUD）" },
   { name: "lights", title: "灯光 · 环境光/方向光/点光/聚光" },
-  { name: "perf-drawcalls", title: "性能 · draw call 压力（500→6000 draws）" },
+  { name: "postfx", title: "后处理 · RenderTarget(MSAA)/Bloom/ToneMap/Vignette" },
+  { name: "perf-drawcalls", title: "性能 · draw call 压力（500→40000 draws）" },
   { name: "perf-instanced", title: "性能 · 实例化压力（4k→262k）" },
   { name: "perf-triangles", title: "性能 · 三角形吞吐" },
 ];

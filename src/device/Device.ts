@@ -44,6 +44,8 @@ export interface DeviceLimits {
    * `UNIFORM_BUFFER_OFFSET_ALIGNMENT` 决定）。
    */
   minUniformBufferOffsetAlignment?: number;
+  /** 支持的最大 MSAA 采样数（1 = 不支持多重采样；缺省视为 1） */
+  maxSamples?: number;
 }
 
 /**

@@ -86,6 +86,7 @@ export class WebGPUDevice extends Device {
         maxUniformBufferBindings: gpu.limits.maxUniformBuffersPerShaderStage * 4,
         maxTextureSize: gpu.limits.maxTextureDimension2D,
         minUniformBufferOffsetAlignment: gpu.limits.minUniformBufferOffsetAlignment,
+        maxSamples: 4,
       };
     }
     return this._limits;
@@ -207,7 +208,12 @@ export class WebGPUDevice extends Device {
               colors.push({ view: canvasTexture.createView(), ...colorAttachmentState(att.loadOp, att.storeOp, att.clearValue) });
             } else {
               const view = (att.view as WebGPUTextureView).gpuView();
-              colors.push({ view, ...colorAttachmentState(att.loadOp, att.storeOp, att.clearValue) });
+              const resolve = att.resolveTo ? (att.resolveTo as WebGPUTextureView).gpuView() : undefined;
+              colors.push({
+                view,
+                resolveTarget: resolve,
+                ...colorAttachmentState(att.loadOp, att.storeOp, att.clearValue),
+              });
             }
           }
           const depthState: GPURenderPassDepthStencilAttachment | undefined = this.resolveDepthAttachment(op.depthStencilAttachment);

@@ -36,6 +36,9 @@ export class WebGPURenderPipeline extends RenderPipeline {
       vertex,
       fragment,
       primitive,
+      // 注意：`multisample` 是 GPURenderPipelineDescriptor 的**顶层**成员，
+      // 放进 fragment 会被 WebIDL 静默忽略（管线仍是 1x，MSAA 附件上校验失败）
+      multisample: { count: Math.max(1, desc.multisample?.count ?? 1) },
     };
     if (desc.depthStencil) {
       descriptor.depthStencil = {

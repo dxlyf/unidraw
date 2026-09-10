@@ -23,10 +23,11 @@
 | 图形拾取 | `Raycaster`（CPU 包围球→三角形精确命中，按距离排序）+ `ColorPicker`（GPU 离屏 ID pass + 像素回读，逐像素精确） |
 | 动画 | `KeyframeTrack`（数值/Vec3/颜色/**自定义绑定**）、`AnimationClip` + `AnimationMixer`/`AnimationAction`（播放/暂停/循环/**时间缩放**/淡入淡出）、`Tween`（`tweenNumber/tweenVec3/tweenColor/tweenObject` + `TweenManager`）、`Easing`（quad/cubic/sine/expo/back/elastic） |
 | 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
+| 离屏与后处理 | `RenderTarget`（格式/深度/**MSAA**/回读，三后端统一）+ `EffectComposer` 效果链（场景目标可选 MSAA → ping-pong 效果 → 呈现）；内置 `CopyPass`/`ToneMapPass`(ACES 等 4 种)/`BloomPass`/`VignettePass`/`GrayscalePass`/`ShaderPass`，自定义效果只要一对 fragment 源码 |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / App·插件（`node --test`，97 个用例） |
-| 示例 | 13 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**App+插件**与 3 个**性能档位循环**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / App·插件 / 后处理（`node --test`，108 个用例） |
+| 示例 | 14 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**后处理**、**App+插件**与 3 个**性能档位**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -81,16 +82,16 @@ WebGL2 / WebGPU 共用一套实现：
 
 ### 性能示例
 
-三个性能示例会自动循环各档位测量（`examples/common/bench.ts` 提供的统一测量框架）：
+三个性能示例共用 `examples/common/bench.ts` 的测量框架（默认**不自动换档**，
+点击档位或 ←/→ 切换后停在那一档，`?cycle=1` 或空格才自动循环）：
 
 | 示例 | 测量什么 | 档位 |
 | --- | --- | --- |
-| `perf-drawcalls` | 每物体一次 draw 的 CPU 开销（含 UBO 提交与绑定） | 500 → 6000 个立方体 |
+| `perf-drawcalls` | 每物体一次 draw 的 CPU 开销（含 UBO 提交与绑定） | 500 → 40 000 个立方体 |
 | `perf-instanced` | 单 draw 内实例化吞吐（顶点/光栅压力） | 4 096 → 262 144 个实例 |
 | `perf-triangles` | 高细分网格的三角形吞吐 | 32×16 → 224×112 细分 ×4 份 |
 
-- 每档先预热 12 帧，再取 90 帧窗口平均，右上角逐档显示 ms / fps；
-- 点击档位可手动停留，**空格**暂停/继续自动循环；
+- 每档先预热 12 帧，再取 90 帧窗口平均，右上角逐档显示 ms / fps（drawcalls 档另显示 **µs/draw**）；
 - 渲染分辨率固定为 CSS 像素（可 `?scale=2`），保证不同档位可比。
 
 ### 性能（draw call 压力）
@@ -189,6 +190,40 @@ tweens.update(dt);
 示例 `examples/animation` 同时演示层级动画（父节点旋转带动子树）、关键帧、Mixer 与 Tween，
 并可用键盘切换循环模式与时间缩放。详见 [docs/animation.md](docs/animation.md)。
 
+### 离屏渲染与后处理（`src/render/RenderTarget.ts` + `src/render/postfx`）
+
+```ts
+import { RenderTarget, EffectComposer, BloomPass, ToneMapPass, VignettePass } from "unidraw";
+
+// 1) 离屏目标（可选 MSAA，WebGL2 用 renderbuffer + blit 解析，WebGPU 用 resolveTarget）
+const target = new RenderTarget(device, { width: 1280, height: 720, sampleCount: 4 });
+const encoder = device.createCommandEncoder("offscreen");
+const offscreen = encoder.beginRenderPass({
+  colorAttachments: [target.colorAttachment()],
+  depthStencilAttachment: target.depthAttachment(),
+});
+sceneRenderer.render(offscreen, scene, camera);
+offscreen.end();
+device.submit([encoder.finish()]);
+const pixels = await target.readPixels();   // 三后端统一的回读
+
+// 2) 后处理链：场景 → (MSAA resolve) → 泛光 → 色调映射 → 暗角 → 画布
+const composer = new EffectComposer(device, { width: canvas.width, height: canvas.height, sampleCount: 4 });
+composer.addPass(new BloomPass(device, { threshold: 0.65, strength: 1.1 }));
+composer.addPass(new ToneMapPass(device, { mode: "aces", exposure: 1.15 }));
+composer.addPass(new VignettePass(device, { strength: 0.45 }));
+composer.render((pass) => sceneRenderer.render(pass, scene, camera));
+```
+
+- 用离屏链路的材质要声明 `targetFormat`（默认取画布格式），否则 WebGPU 会报附件格式不匹配；
+- 效果管线按链路格式创建，最后自动用一趟与**输出格式**匹配的拷贝 pass 呈现
+  （所以 WebGL2 画布 `rgba8unorm` 与 WebGPU 画布 `bgra8unorm` 都不需要特殊处理）；
+- 自定义效果继承 `FullScreenPass` 即可，只要一对 GLSL + WGSL fragment 源码；
+- 示例 `examples/postfx`（B 泛光 · T 色调映射 · V 暗角 · M MSAA · P 整链开关）自带
+  `POSTFX_SELFTEST`，可跨后端对比像素统计。
+
+详见 [docs/postfx.md](docs/postfx.md)。
+
 ### 应用门面与插件（`src/app`）
 
 ```ts
@@ -265,17 +300,19 @@ src/
                constants.ts + gpuUtils.ts + resources/<每类一个文件> + <Backend>Device.ts
   command/     ops.ts（统一命令）、CommandBuffer / RenderPassEncoder / CommandEncoder
                （encoder.ts 为 barrel，保持 `command/encoder.js` 不变）
-  render/      Camera、Geometry、Mesh、UniformBlock、Renderer 门面
+  render/      Camera、Geometry、Mesh、UniformBlock、Renderer 门面、RenderTarget
     material.ts / shaders.ts / primitives.ts / texture.ts 均为 barrel；
     实现按「一个类/一个几何体/一份材质一个文件」放在同目录或子目录
     （materialCommon.ts、shaders/*、primitives/*、texture/*）
+    postfx/    EffectComposer + FullScreenPass（效果契约）+ 每种效果一个文件
+               （CopyPass/ToneMapPass/BloomPass/VignettePass/GrayscalePass/ShaderPass）
   render2d/    Canvas2D 完整 2D：路径/贝塞尔/arc/圆角矩形、填充描边、渐变、
                变换、文本、裁剪（WebGL2/WebGPU 共用）
                path.ts / style.ts / renderer2d.ts 为 barrel，实现拆到
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      13 个示例 + common/（demo 引导、bench 测量框架）
+examples/      14 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -306,6 +343,7 @@ docs/          中文文档（见下）
 - [场景图 / 交互 / 拾取](docs/picking.md)
 - [动画（关键帧 · Mixer · Tween）](docs/animation.md)
 - [灯光（环境光/方向光/点光/聚光）](docs/lighting.md)
+- [离屏渲染与后处理（RenderTarget · MSAA · EffectComposer）](docs/postfx.md)
 - [App 门面与插件](docs/app.md)
 - [着色器写作指南](docs/shader-guide.md)
 - [扩展指南（新后端 / 新材质 / 新示例）](docs/extension.md)
@@ -314,9 +352,10 @@ docs/          中文文档（见下）
 
 ## 路线图（可能的后续）
 
+- 阴影（Shadow Map：方向光/聚光/点光 + PCF）
 - 计算管线 / 存储缓冲 / indirect draw
-- 离屏渲染与后处理便捷封装（低层能力已具备，见 extension 文档）
-- 纹理压缩格式、多采样、mipmap 自动生成
+- 实例化合批（`InstancedMesh`）与更激进的命令编码去 GC
+- 纹理压缩格式、mipmap 自动生成（WebGL2 `generateMipmaps`、`maxAnisotropy`）
 - 更完整的数学（四元数、AABB、射线）
 - WebGPU 原生 GPU 队列级编码（当前在 submit 时翻译统一命令，换取三后端一致性）
 

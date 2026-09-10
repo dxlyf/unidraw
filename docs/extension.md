@@ -58,9 +58,24 @@ app.use(definePlugin({
 需要自定义绘制时用 `ctx.sceneRenderer.collectVisible(scene, camera)` 复用主渲染的
 剔除/排序结果，避免重复遍历场景。
 
-## 4. 离屏渲染（render-to-texture）
+## 4. 离屏渲染（render-to-texture）与后处理
 
-底层能力已经具备，可直接组合：
+**推荐直接用 `RenderTarget` + `EffectComposer`**（自动处理 MSAA/解析/回读/呈现格式）：
+
+```ts
+import { RenderTarget, EffectComposer, BloomPass, ToneMapPass, FullScreenPass } from "unidraw";
+
+const composer = new EffectComposer(device, { width, height, sampleCount: 4 });
+composer.addPass(new BloomPass(device, { threshold: 0.65 }));
+composer.addPass(new ToneMapPass(device, { mode: "aces", exposure: 1.15 }));
+composer.render((pass) => sceneRenderer.render(pass, scene, camera));
+```
+
+自定义效果继承 `FullScreenPass`，给一对 fragment 源码即可（见
+[docs/postfx.md](postfx.md) §3.3）；多趟效果用 `ctx.encoder` 自己开内部 pass，
+最后用 `ctx.beginOutputPass()` 合成（**不要嵌套 pass**）。
+
+底层也可以手动组合：
 
 ```ts
 const rt = device.createTexture({ width, height, format: "rgba8unorm",

@@ -16,7 +16,7 @@ import { GLProgram } from "./resources/GLProgram.js";
 import { GLRenderPipeline } from "./resources/GLRenderPipeline.js";
 import { GLSampler } from "./resources/GLSampler.js";
 import { GLTexture } from "./resources/GLTexture.js";
-import { attributeGLType, describeRenderer } from "./glUtils.js";
+import { attributeGLType, describeRenderer, textureGLParams } from "./glUtils.js";
 import { flipRowsInPlace, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
 
 
@@ -29,6 +29,8 @@ export class WebGL2Device extends Device {
   private _textureUnitCursor = 0;
   private readonly _vaos = new Map<string, WebGLVertexArrayObject>();
   private readonly _fbos = new Map<string, WebGLFramebuffer>();
+  /** MSAA renderbuffer 缓存（key: 格式|尺寸|采样数） */
+  private readonly _renderbuffers = new Map<string, WebGLRenderbuffer>();
   /** 当前绑定的 VAO（避免重复 bindVertexArray） */
   private _boundVao: WebGLVertexArrayObject | null = null;
   /** 上一次绘制用的 VAO 及其指纹（大量 draw 时跳过 key 字符串构造） */
@@ -75,6 +77,7 @@ export class WebGL2Device extends Device {
         maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
         minUniformBufferOffsetAlignment:
           (gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) as number | null) ?? 256,
+        maxSamples: (gl.getParameter(gl.MAX_SAMPLES) as number | null) ?? 1,
       };
     }
     return this._limits;
@@ -201,6 +204,9 @@ export class WebGL2Device extends Device {
     let indexBuffer: { buffer: GLBuffer; format: IndexFormat; offset: number } | null = null;
     let targetWidth = 0;
     let targetHeight = 0;
+    /** 当前 pass 若是 MSAA，则记录源 FBO 与解析目标（endRenderPass 时 blit） */
+    let msaaSourceFb: WebGLFramebuffer | null = null;
+    let msaaResolveTarget: Texture | null = null;
     /** 当前 pass 的附件高度（scissor/viewport 的 Y 翻转用） */
     let passHeight = 0;
 
@@ -227,8 +233,13 @@ export class WebGL2Device extends Device {
             targetWidth = this.canvas?.width ?? 0;
             targetHeight = this.canvas?.height ?? 0;
           } else {
-            const fb = this.getFramebuffer(colorTex ?? null, depthTex ?? null);
+            const msaa = (colorTex?.sampleCount ?? 1) > 1 || (depthTex?.sampleCount ?? 1) > 1;
+            const fb = msaa
+              ? this.getMsaaFramebuffer(colorTex ?? null, depthTex ?? null)
+              : this.getFramebuffer(colorTex ?? null, depthTex ?? null);
             gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+            msaaSourceFb = msaa ? fb : null;
+            msaaResolveTarget = msaa ? (colorAtt?.resolveTo?.texture ?? null) : null;
             const count = op.colorAttachments.filter((a) => a !== null).length || 1;
             const bufs: number[] = [];
             for (let i = 0; i < count; i++) bufs.push(gl.COLOR_ATTACHMENT0 + i);
@@ -271,6 +282,12 @@ export class WebGL2Device extends Device {
           assert(inPass, "endRenderPass 无对应 beginRenderPass");
           inPass = false;
           resetPass();
+          // MSAA：把多重采样附件解析到目标纹理（WebGPU 的 resolveTarget 语义）
+          if (msaaSourceFb && msaaResolveTarget) {
+            this.resolveMsaa(msaaSourceFb, msaaResolveTarget);
+          }
+          msaaSourceFb = null;
+          msaaResolveTarget = null;
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
           gl.disable(gl.SCISSOR_TEST);
           this._scissorEnabled = false;
@@ -558,11 +575,70 @@ export class WebGL2Device extends Device {
     return fb;
   }
 
+  /** 多重采样 attachment 用的 renderbuffer（按 格式×尺寸×采样数 缓存复用）。 */
+  private getRenderbuffer(texture: GLTexture): WebGLRenderbuffer {
+    const gl = this.gl;
+    const key = `${texture.format}|${texture.width}x${texture.height}|${texture.sampleCount}`;
+    const cached = this._renderbuffers.get(key);
+    if (cached) return cached;
+    const rb = gl.createRenderbuffer();
+    assert(rb, "createRenderbuffer 失败");
+    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+    const params = textureGLParams(gl, texture.format);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, texture.sampleCount, params.internal, texture.width, texture.height);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    this._renderbuffers.set(key, rb);
+    return rb;
+  }
+
+  /** MSAA framebuffer：颜色/深度都用多重采样 renderbuffer；解析目标在 pass 结束时 blit。 */
+  private getMsaaFramebuffer(color: GLTexture | null, depth: GLTexture | null): WebGLFramebuffer {
+    const gl = this.gl;
+    const key = `msaa:c${color ? color.id : 0}d${depth ? depth.id : 0}s${color?.sampleCount ?? depth?.sampleCount ?? 1}`;
+    const cached = this._fbos.get(key);
+    if (cached) return cached;
+    const fb = gl.createFramebuffer();
+    assert(fb, "createFramebuffer 失败");
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    if (color) gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, this.getRenderbuffer(color));
+    if (depth) gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.getRenderbuffer(depth));
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    assert(status === gl.FRAMEBUFFER_COMPLETE, `MSAA Framebuffer 不完整：0x${status.toString(16)}`);
+    this._fbos.set(key, fb);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fb;
+  }
+
+  /** 把多重采样附件解析（resolve）到普通纹理。 */
+  private resolveMsaa(source: WebGLFramebuffer, target: Texture): void {
+    const gl = this.gl;
+    const tex = target as GLTexture;
+    const dst = this.getFramebuffer(tex, null);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, source);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst);
+    gl.blitFramebuffer(
+      0,
+      0,
+      tex.width,
+      tex.height,
+      0,
+      0,
+      tex.width,
+      tex.height,
+      gl.COLOR_BUFFER_BIT,
+      gl.NEAREST,
+    );
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+  }
+
   protected destroyNative(): void {
     for (const vao of this._vaos.values()) this.gl.deleteVertexArray(vao);
     this._vaos.clear();
     for (const fb of this._fbos.values()) this.gl.deleteFramebuffer(fb);
     this._fbos.clear();
+    for (const rb of this._renderbuffers.values()) this.gl.deleteRenderbuffer(rb);
+    this._renderbuffers.clear();
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 }

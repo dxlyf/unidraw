@@ -45,7 +45,12 @@ export interface MaterialOptions {
 export abstract class BaseMaterial {
   protected readonly device: Device;
   protected readonly layout: BindGroupLayout;
+  /** 默认管线（sampleCount = 1 或构造时的 `MaterialOptions.sampleCount`） */
   protected readonly pipeline: RenderPipeline;
+  /** 按附件采样数缓存的管线（MSAA 场景目标会自动用到，材质侧无需关心） */
+  private readonly _pipelinesBySamples = new Map<number, RenderPipeline>();
+  private readonly _program: Program;
+  private readonly _opts: MaterialOptions;
   protected readonly cameraBlock: UniformBlock;
   protected modelBlock: UniformBlock;
   protected readonly materialBlock: UniformBlock;
@@ -62,26 +67,53 @@ export abstract class BaseMaterial {
   /** 所有需要「提交前合批上传」的块（含扩容替换下来的旧块） */
   private readonly _flushBlocks: UniformBlock[] = [];
 
+  /**
+   * 按附件的采样数取管线。WebGPU 要求管线的 `multisample.count` 与附件一致，
+   * 因此使用 MSAA 渲染目标（`RenderTarget({ sampleCount: 4 })`）时会自动
+   * 为同一材质创建一份 4x 管线 —— 调用方无需关心。
+   */
+  private _pipelineFor(sampleCount: number): RenderPipeline {
+    const cached = this._pipelinesBySamples.get(sampleCount);
+    if (cached) return cached;
+    const pipeline = this._createPipeline(sampleCount, targetFormatOf(this.device, this._opts), this._opts.depth !== false);
+    this._pipelinesBySamples.set(sampleCount, pipeline);
+    return pipeline;
+  }
+
+  private _createPipeline(sampleCount: number, targetFormat: TextureFormat, depth: boolean): RenderPipeline {
+    return this.device.createRenderPipeline({
+      label: this._opts.label ? `${this._opts.label}${sampleCount > 1 ? `-msaa${sampleCount}` : ""}` : undefined,
+      program: this._program,
+      bindGroupLayouts: [this.layout],
+      vertex: STANDARD_VERTEX_STATE,
+      primitive: { topology: "triangle-list", cullMode: this._opts.cullMode ?? "back", frontFace: "ccw" },
+      depthStencil:
+        depth === false
+          ? null
+          : { format: depthFormatOf(this.device, this._opts), depthWriteEnabled: true, depthCompare: "less-equal" },
+      targets: [
+        {
+          format: targetFormat,
+          writeMask: ColorWriteMask.ALL,
+          blend: this._opts.alphaBlend ? defaultBlendState() : undefined,
+        },
+      ],
+      multisample: { count: sampleCount },
+    });
+  }
+
   protected constructor(device: Device, program: Program, opts: MaterialOptions, extraLayoutEntries: BindGroupLayoutEntryDescriptor[] = []) {
     this.device = device;
+    this._program = program;
+    this._opts = opts;
     const targetFormat = targetFormatOf(device, opts);
     const depth = opts.depth !== false;
     this.layout = device.createBindGroupLayout({
       label: opts.label ? `${opts.label}-layout` : undefined,
       entries: [...defaultGroupEntries(), ...extraLayoutEntries],
     });
-    this.pipeline = device.createRenderPipeline({
-      label: opts.label,
-      program,
-      bindGroupLayouts: [this.layout],
-      vertex: STANDARD_VERTEX_STATE,
-      primitive: { topology: "triangle-list", cullMode: opts.cullMode ?? "back", frontFace: "ccw" },
-      depthStencil:
-        depth === false
-          ? null
-          : { format: depthFormatOf(device, opts), depthWriteEnabled: true, depthCompare: "less-equal" },
-      targets: [{ format: targetFormat, writeMask: ColorWriteMask.ALL, blend: opts.alphaBlend ? defaultBlendState() : undefined }],
-    });
+    this.pipeline = this._createPipeline(1, targetFormat, depth);
+    this._pipelinesBySamples.set(1, this.pipeline);
     this.cameraBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-camera` : "camera", fields: CAMERA_FIELDS });
     this._modelSlotCount = Math.max(1, Math.floor(opts.modelRingSlots ?? 4));
     this.modelBlock = new UniformBlock(device, {
@@ -198,7 +230,7 @@ export abstract class BaseMaterial {
     const extra = this.extraDynamicOffsets(slot);
 
     // 管线/绑定组状态由后端做冗余消除；这里始终记录，避免多材质交替时状态错乱
-    pass.setPipeline(this.pipeline);
+    pass.setPipeline(this._pipelineFor(pass.sampleCount));
     pass.setBindGroup(0, this.bindGroup, [slot * this.modelBlock.stride, ...extra]);
     pass.setVertexBuffer(0, geometry.vertexBuffer);
     if (geometry.indexFormat) {

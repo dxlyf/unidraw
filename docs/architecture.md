@@ -15,7 +15,8 @@
 │  animation/ KeyframeTrack·AnimationClip·Mixer·Tween·Easing    │
 ├──────────────────────────────────────────────────────────────┤
 │  render/   Geometry·primitives·material·texture·              │  易用层
-│            Camera·Mesh·Renderer·UniformBlock                  │  （内置材质=约定）
+│            Camera·Mesh·Renderer·UniformBlock·RenderTarget·    │  （内置材质=约定）
+│            postfx/（EffectComposer + 内置效果）                │
 │  render2d/ Canvas2D（路径/填充/文本/裁剪）                     │
 ├──────────────────────────────────────────────────────────────┤
 │  command/  ops·CommandEncoder·RenderPassEncoder·              │  统一命令层
@@ -224,22 +225,38 @@ CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种�
   「拾取到的」一致。
 - 细节见 [picking.md](picking.md)。
 
-## 9. 为什么要 Mock 后端
+## 9. 离屏渲染、MSAA 与后处理
+
+- `RenderTarget`（`render/RenderTarget.ts`）把颜色 + 深度 + 可选 MSAA 解析目标打包，
+  三后端行为一致：`texture` 永远是**解析后可采样**的结果；
+- MSAA 的翻译方式：
+  - WebGPU：多采样纹理 + `resolveTarget`（管线 `multisample.count` 必须与附件一致）；
+  - WebGL2：多重采样 renderbuffer + `endRenderPass` 时 `blitFramebuffer` 解析；
+  - Mock：只记录采样数（无头单测断言用）。
+- 管线按采样数缓存：`RenderPassEncoder.sampleCount` → 材质/效果选择匹配管线，
+  使用方切 MSAA 不需要重建材质（`setSampleCount()` 只换场景目标）；
+- `EffectComposer` 的效果链写在**链路格式**的内部 ping-pong 目标上，最后用一趟
+  **按输出格式**创建的 `CopyPass` 呈现到画布或外部 `RenderTarget`
+  —— 这样 WebGPU 的 `bgra8unorm` 画布与 WebGL2 的 `rgba8unorm` 画布都能直接工作；
+- 细节见 [postfx.md](postfx.md)。
+
+## 10. 为什么要 Mock 后端
 
 - 无浏览器/GPU（CI、SSR、编辑器）也能执行整条“记录→提交”链路；
 - 在命令执行处做与 GPU 一致的校验（格式匹配等），提前暴露 API 误用；
 - 记录 draw 快照（pipeline/groups/buffers/参数），供单元测试断言。
 
-## 10. 已知边界（v0.1）
+## 11. 已知边界（v0.1）
 
 - 单色附件渲染为主；MRT 在 WebGL2 端仅部分支持；
 - 纹理格式子集：`rgba8unorm(-srgb)/r8unorm/rg8unorm/r32float/rgba16float/
   rgba32float/depth24plus/depth32float`；无压缩纹理；
 - 回读仅支持 8bit 颜色纹理（`rgba8unorm/bgra8unorm` 系列）；
-- 无计算管线、无 storage buffer、无 indirect draw（扩展点已预留命名）；
+- 无阴影、无计算管线、无 storage buffer、无 indirect draw（扩展点已预留命名）；
+- WebGL2 侧 `maxAnisotropy` 与 WebGPU 侧 `generateMipmaps()` 尚未接到底层 API；
 - WGSL/GLSL 需成对写作（参考着色器指南），未来可引入自动转译。
 
-## 11. 未来优化方向
+## 12. 未来优化方向
 
 - 提交期避免“先记录再翻译”的双份开销（为三后端一致性而设计，可针对 WebGPU
   增加直接编码路径）；

@@ -33,6 +33,7 @@ export class MockDevice extends Device {
       maxUniformBufferBindings: 16,
       maxTextureSize: 4096,
       minUniformBufferOffsetAlignment: 256,
+      maxSamples: 4,
     };
   }
 

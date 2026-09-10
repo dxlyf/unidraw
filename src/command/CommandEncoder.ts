@@ -39,6 +39,8 @@ export class CommandEncoder {
               loadOp: att.loadOp ?? "clear",
               storeOp: att.storeOp ?? "store",
               clearValue: att.clearValue,
+              resolveTo: att.resolveTo ?? null,
+              sampleCount: att.sampleCount ?? 1,
             },
     );
     const depth = desc.depthStencilAttachment;
@@ -50,9 +52,13 @@ export class CommandEncoder {
             depthLoadOp: depth.depthLoadOp ?? "clear",
             depthStoreOp: depth.depthStoreOp ?? "store",
             depthClearValue: depth.depthClearValue ?? 1,
+            sampleCount: depth.sampleCount ?? 1,
           };
     this._ops.push({ k: "beginRenderPass", label: desc.label, colorAttachments, depthStencilAttachment: depthOp });
-    const pass = new RenderPassEncoder(this._ops, desc.label, () => {
+    // 附件的采样数：材质据此选择匹配的管线（WebGPU 要求管线 multisample.count 与附件一致）
+    let sampleCount = depthOp?.sampleCount ?? 1;
+    for (const att of colorAttachments) if (att) sampleCount = Math.max(sampleCount, att.sampleCount ?? 1);
+    const pass = new RenderPassEncoder(this._ops, desc.label, sampleCount, () => {
       this._activePass = null;
     });
     this._activePass = pass;

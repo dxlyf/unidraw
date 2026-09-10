@@ -42,7 +42,7 @@ pushDebugGroup / popDebugGroup
 ```ts
 {
   colorAttachments: (RenderPassColorAttachment | null)[]; // 允许数组，取第一个作为主附件
-  depthStencilAttachment?: { view; depthLoadOp?; depthStoreOp?; depthClearValue? };
+  depthStencilAttachment?: { view; depthLoadOp?; depthStoreOp?; depthClearValue?; sampleCount? };
 }
 ```
 
@@ -52,6 +52,12 @@ pushDebugGroup / popDebugGroup
 - 清屏不受 scissor 影响（与 WebGPU 一致）。
 - 渲染目标格式校验：pipeline `targets[i].format` 必须与附件格式一致（WebGPU 强校验；
   WebGL2/Mock 在命令层做等价断言，尽早报错）。
+- **MSAA**：颜色附件可带 `sampleCount` 与 `resolveTo`（与 WebGPU 语义一致），
+  `RenderPassDescriptor` 的附件与管线 `multisample.count` 必须匹配。
+  `RenderTarget.colorAttachment()` 会自动填好这两个字段；WebGL2 用多重采样
+  renderbuffer + `endRenderPass` 时 `blitFramebuffer` 解析，WebGPU 直接交给
+  `resolveTarget`。`RenderPassEncoder.sampleCount` 暴露本 pass 生效的采样数
+  （材质据此选择匹配管线）。
 
 ## 4. 绘制命令
 
