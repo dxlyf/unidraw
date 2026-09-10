@@ -58,6 +58,10 @@ pushDebugGroup / popDebugGroup
   renderbuffer + `endRenderPass` 时 `blitFramebuffer` 解析，WebGPU 直接交给
   `resolveTarget`。`RenderPassEncoder.sampleCount` 暴露本 pass 生效的采样数
   （材质据此选择匹配管线）。
+- **只写深度的 pass**：`colorAttachments: []` 表示没有颜色附件（阴影贴图用），
+  此时必须有深度附件；管线 `targets: []` + `depthStencil`。
+  WebGPU 直接支持；WebGL2 用「无颜色附件的 FBO + `drawBuffers([gl.NONE])`」，
+  viewport 取深度附件的尺寸；Mock 仅记录 pass。
 
 ## 4. 绘制命令
 

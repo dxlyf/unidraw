@@ -14,17 +14,34 @@
  */
 
 import { MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, MAX_SPOT_LIGHTS } from "./LightsState.js";
+import { shadowLookupGLSL, shadowLookupWGSL } from "../shadow/shadowShaders.js";
 
 export interface LightingShaderOptions {
   /** 是否生成高光代码（PhongMaterial 需要） */
   specular?: boolean;
+  /**
+   * 是否生成阴影代码（默认 true）。
+   *
+   * 内置受光材质都打开；自定义材质如果不想支付「阴影查询」的代价（几行 uniform
+   * 读取 + 最多 4 次矩阵乘），可以传 false（但 layout 里的 binding 仍然存在）。
+   */
+  shadows?: boolean;
+}
+
+/** 阴影片段的插入点（GLSL：在 LightsBlock 之后；WGSL：在 LightsBlock 之后） */
+function shadowSnippet(options: LightingShaderOptions): string {
+  return options.shadows === false ? "" : shadowLookupGLSL();
 }
 
 /** GLSL：LightsBlock 声明 + `unidrawLighting()` */
 export function lightingGLSL(options: LightingShaderOptions = {}): string {
   const specular = options.specular ?? false;
+  const shadows = options.shadows !== false;
+  /** 阴影可见度（0/1 混合；关闭时是常量 1，编译器会优化掉） */
+  const dirShadow = shadows ? "    float shadow = unidrawShadow(0, i, worldPos, n, ndl);" : "    float shadow = 1.0;";
+  const spotShadow = shadows ? "    float shadow = unidrawShadow(1, i, worldPos, n, ndl);" : "    float shadow = 1.0;";
   const specDir = specular
-    ? `    if (ndl > 0.0) { vec3 h = normalize(L + viewDir); spec += pow(max(dot(n, h), 0.0), shininess); }`
+    ? `    if (ndl > 0.0) { vec3 h = normalize(L + viewDir); spec += shadow * pow(max(dot(n, h), 0.0), shininess); }`
     : "";
   return `
 layout(std140) uniform LightsBlock {
@@ -38,7 +55,7 @@ layout(std140) uniform LightsBlock {
   vec4 u_spotDir[${MAX_SPOT_LIGHTS}];          // xyz 方向, w cos(外锥角)
   vec4 u_spotColor[${MAX_SPOT_LIGHTS}];        // rgb 颜色×强度, a cos(内锥角)
 };
-
+${shadowSnippet(options)}
 vec4 unidrawLighting(vec3 n, vec3 worldPos, vec3 viewDir, float ambientWeight) {
   vec3 diffuse = u_ambient.rgb * ambientWeight;
   float spec = 0.0;
@@ -51,7 +68,8 @@ vec4 unidrawLighting(vec3 n, vec3 worldPos, vec3 viewDir, float ambientWeight) {
     if (i >= dirCount) break;
     vec3 L = -u_dirDir[i].xyz;
     float ndl = max(dot(n, L), 0.0);
-    diffuse += u_dirColor[i].rgb * ndl;
+${dirShadow}
+    diffuse += u_dirColor[i].rgb * ndl * shadow;
 ${specDir}
   }
 
@@ -81,8 +99,9 @@ ${specular ? `    if (ndl > 0.0) { vec3 h = normalize(L + viewDir); spec += atte
     float range = u_spotPos[i].w;
     if (range > 0.0) { float f = clamp(1.0 - pow(d / range, 4.0), 0.0, 1.0); atten *= f * f; }
     float ndl = max(dot(n, L), 0.0);
-    diffuse += u_spotColor[i].rgb * ndl * atten;
-${specular ? `    if (ndl > 0.0) { vec3 h = normalize(L + viewDir); spec += atten * pow(max(dot(n, h), 0.0), shininess); }` : ""}
+${spotShadow}
+    diffuse += u_spotColor[i].rgb * ndl * atten * shadow;
+${specular ? `    if (ndl > 0.0) { vec3 h = normalize(L + viewDir); spec += shadow * atten * pow(max(dot(n, h), 0.0), shininess); }` : ""}
   }
 
   return vec4(diffuse, spec);
@@ -93,6 +112,13 @@ ${specular ? `    if (ndl > 0.0) { vec3 h = normalize(L + viewDir); spec += atte
 /** WGSL：与 GLSL 版本逐项对应的 `unidrawLighting()` */
 export function lightingWGSL(options: LightingShaderOptions = {}): string {
   const specular = options.specular ?? false;
+  const shadows = options.shadows !== false;
+  const dirShadow = shadows
+    ? "    let shadow = unidrawShadow(0, i, worldPos, n, ndl);"
+    : "    let shadow = 1.0;";
+  const spotShadow = shadows
+    ? "    let shadow = unidrawShadow(1, i, worldPos, n, ndl);"
+    : "    let shadow = 1.0;";
   return `
 struct LightsBlock {
   u_ambient : vec4f,
@@ -106,7 +132,7 @@ struct LightsBlock {
   u_spotColor : array<vec4f, ${MAX_SPOT_LIGHTS}>,
 };
 @group(0) @binding(3) var<uniform> lights : LightsBlock;
-
+${shadows ? shadowLookupWGSL() : ""}
 fn unidrawLighting(n : vec3f, worldPos : vec3f, viewDir : vec3f, ambientWeight : f32) -> vec4f {
   var diffuse = lights.u_ambient.rgb * ambientWeight;
   var spec = 0.0;
@@ -119,8 +145,9 @@ fn unidrawLighting(n : vec3f, worldPos : vec3f, viewDir : vec3f, ambientWeight :
     if (i >= dirCount) { break; }
     let L = -lights.u_dirDir[i].xyz;
     let ndl = max(dot(n, L), 0.0);
-    diffuse = diffuse + lights.u_dirColor[i].rgb * ndl;
-${specular ? `    if (ndl > 0.0) { let h = normalize(L + viewDir); spec = spec + pow(max(dot(n, h), 0.0), shininess); }` : ""}
+${dirShadow}
+    diffuse = diffuse + lights.u_dirColor[i].rgb * ndl * shadow;
+${specular ? `    if (ndl > 0.0) { let h = normalize(L + viewDir); spec = spec + shadow * pow(max(dot(n, h), 0.0), shininess); }` : ""}
   }
 
   for (var i = 0; i < ${MAX_POINT_LIGHTS}; i = i + 1) {
@@ -149,8 +176,9 @@ ${specular ? `    if (ndl > 0.0) { let h = normalize(L + viewDir); spec = spec +
     let range = lights.u_spotPos[i].w;
     if (range > 0.0) { let f = clamp(1.0 - pow(d / range, 4.0), 0.0, 1.0); atten = atten * f * f; }
     let ndl = max(dot(n, L), 0.0);
-    diffuse = diffuse + lights.u_spotColor[i].rgb * ndl * atten;
-${specular ? `    if (ndl > 0.0) { let h = normalize(L + viewDir); spec = spec + atten * pow(max(dot(n, h), 0.0), shininess); }` : ""}
+${spotShadow}
+    diffuse = diffuse + lights.u_spotColor[i].rgb * ndl * atten * shadow;
+${specular ? `    if (ndl > 0.0) { let h = normalize(L + viewDir); spec = spec + shadow * atten * pow(max(dot(n, h), 0.0), shininess); }` : ""}
   }
 
   return vec4f(diffuse, spec);

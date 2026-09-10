@@ -240,23 +240,39 @@ CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种�
   —— 这样 WebGPU 的 `bgra8unorm` 画布与 WebGL2 的 `rgba8unorm` 画布都能直接工作；
 - 细节见 [postfx.md](postfx.md)。
 
-## 10. 为什么要 Mock 后端
+## 10. 阴影（Shadow Map）
+
+- 每个投影灯（方向光/聚光）一张 `depth32float` 贴图，深度 pass 用
+  「无颜色附件 + 深度附件」的只写深度管线（WebGL2 走 `drawBuffers([NONE])`）；
+- 光源视投影矩阵：方向光按可见物体包围球做正交拟合并在光空间右/上轴取整
+  （texel snapping，减少抖动）；聚光用透视（视场角 = 外锥角 × 1.05）；
+- 采样侧不依赖比较采样器：着色器用 `texelFetch` / `textureLoad` 读原始深度自己比较，
+  3×3 PCF；两个后端的差异只有深度范围约定（WebGL2 窗口深度 = `(z_ndc+1)/2`，
+  WebGPU 存 `z_ndc`），各写一份 shader 片段解决；
+- 数据通道：`ShadowBlock`（binding 6）+ 4 张贴图（7..10）+ 4 个采样器（11..14）
+  由 `defaultGroupEntries()` 固定声明，UBO/贴图池/占位纹理全设备共享；
+- **一次 submit 内不能既写又读同一张纹理**：阴影 pass 必须与主 pass 分两次提交
+  （`ShadowRenderer.renderAndSubmit()` / `AppOptions.shadows`），
+  且深度材质不声明阴影贴图 binding（`receiveShadows: false`）；
+- 细节见 [shadows.md](shadows.md)。
+
+## 11. 为什么要 Mock 后端
 
 - 无浏览器/GPU（CI、SSR、编辑器）也能执行整条“记录→提交”链路；
 - 在命令执行处做与 GPU 一致的校验（格式匹配等），提前暴露 API 误用；
 - 记录 draw 快照（pipeline/groups/buffers/参数），供单元测试断言。
 
-## 11. 已知边界（v0.1）
+## 12. 已知边界（v0.1）
 
 - 单色附件渲染为主；MRT 在 WebGL2 端仅部分支持；
 - 纹理格式子集：`rgba8unorm(-srgb)/r8unorm/rg8unorm/r32float/rgba16float/
   rgba32float/depth24plus/depth32float`；无压缩纹理；
 - 回读仅支持 8bit 颜色纹理（`rgba8unorm/bgra8unorm` 系列）；
-- 无阴影、无计算管线、无 storage buffer、无 indirect draw（扩展点已预留命名）；
+- 阴影只覆盖方向光/聚光（点光 cube map 未实现）；无计算管线、无 storage buffer、无 indirect draw；
 - WebGL2 侧 `maxAnisotropy` 与 WebGPU 侧 `generateMipmaps()` 尚未接到底层 API；
 - WGSL/GLSL 需成对写作（参考着色器指南），未来可引入自动转译。
 
-## 12. 未来优化方向
+## 13. 未来优化方向
 
 - 提交期避免“先记录再翻译”的双份开销（为三后端一致性而设计，可针对 WebGPU
   增加直接编码路径）；

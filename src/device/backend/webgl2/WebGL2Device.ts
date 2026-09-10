@@ -223,7 +223,9 @@ export class WebGL2Device extends Device {
           assert(!inPass, "beginRenderPass 嵌套非法");
           const colorAtt = op.colorAttachments[0];
           const colorTex = colorAtt?.view?.texture as GLTexture | undefined;
-          const toCanvas = colorAtt === null || colorAtt?.view === null;
+          // 没有任何颜色附件（`colorAttachments: []`）= 只写深度的 pass（阴影贴图）
+          const depthOnly = op.colorAttachments.length === 0;
+          const toCanvas = !depthOnly && (colorAtt === null || colorAtt?.view === null);
           const depthAtt = op.depthStencilAttachment;
           const depthTex = depthAtt?.view?.texture as GLTexture | undefined;
           const scissorWas = this._scissorEnabled;
@@ -240,12 +242,18 @@ export class WebGL2Device extends Device {
             gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
             msaaSourceFb = msaa ? fb : null;
             msaaResolveTarget = msaa ? (colorAtt?.resolveTo?.texture ?? null) : null;
-            const count = op.colorAttachments.filter((a) => a !== null).length || 1;
-            const bufs: number[] = [];
-            for (let i = 0; i < count; i++) bufs.push(gl.COLOR_ATTACHMENT0 + i);
-            gl.drawBuffers(bufs);
-            targetWidth = colorTex?.width ?? 0;
-            targetHeight = colorTex?.height ?? 0;
+            const count = op.colorAttachments.filter((a) => a !== null).length;
+            if (count === 0) {
+              // 深度专用 FBO：不能引用不存在的颜色附件
+              assert(depthTex != null, "没有颜色附件时必须提供深度附件");
+              gl.drawBuffers([gl.NONE]);
+            } else {
+              const bufs: number[] = [];
+              for (let i = 0; i < count; i++) bufs.push(gl.COLOR_ATTACHMENT0 + i);
+              gl.drawBuffers(bufs);
+            }
+            targetWidth = colorTex?.width ?? depthTex?.width ?? 0;
+            targetHeight = colorTex?.height ?? depthTex?.height ?? 0;
           }
           passHeight = targetHeight;
 

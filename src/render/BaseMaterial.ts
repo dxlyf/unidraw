@@ -12,6 +12,9 @@ import type { Geometry } from "./Geometry.js";
 import { Mesh } from "./Mesh.js";
 import { CAMERA_FIELDS, MATERIAL_FIELDS, MODEL_FIELDS, STANDARD_VERTEX_STATE, defaultBlendState, defaultGroupEntries, depthFormatOf, targetFormatOf } from "./materialCommon.js";
 import { LIGHTS_FIELDS, LightsState } from "./lights/LightsState.js";
+import { MAX_SHADOW_MAPS } from "./shadow/constants.js";
+import { SHADOW_BLOCK_BINDING, SHADOW_SAMPLER_BINDING, SHADOW_TEXTURE_BINDING } from "./shadow/ShadowState.js";
+import { shadowResources } from "./shadow/ShadowResources.js";
 
 const EMPTY_OFFSETS: readonly number[] = [];
 
@@ -26,6 +29,20 @@ export interface MaterialOptions {
   depthFormat?: TextureFormat;
   /** 启用标准 alpha 混合（半透明） */
   alphaBlend?: boolean;
+  /**
+   * 只写深度（阴影贴图等）：管线不带颜色附件。
+   *
+   * 需要配合 `beginRenderPass({ colorAttachments: [], depthStencilAttachment })` 使用
+   * （WebGL2 会走「无颜色附件的 FBO + drawBuffers(NONE)」路径）。
+   */
+  depthOnly?: boolean;
+  /**
+   * 是否接收阴影（默认 true）：false 时 bind group 里不声明/不绑定阴影贴图。
+   *
+   * 阴影贴图 pass 用的深度材质必须设为 false —— WebGPU 不允许同一次提交内
+   * 某张纹理既作为附件写入、又作为只读纹理资源绑定。
+   */
+  receiveShadows?: boolean;
   /** 每帧最多绘制的物体数（模型矩阵环形槽初始容量，超出自动扩容） */
   modelRingSlots?: number;
   label?: string;
@@ -66,6 +83,10 @@ export abstract class BaseMaterial {
   private readonly _lightsState: LightsState;
   /** 所有需要「提交前合批上传」的块（含扩容替换下来的旧块） */
   private readonly _flushBlocks: UniformBlock[] = [];
+  /** 上次建 bind group 时的阴影资源版本（贴图池变化时重建） */
+  private _shadowVersion = -1;
+  /** 是否接收阴影（false 时布局/绑定都不含阴影槽位） */
+  private readonly _receiveShadows: boolean;
 
   /**
    * 按附件的采样数取管线。WebGPU 要求管线的 `multisample.count` 与附件一致，
@@ -81,6 +102,7 @@ export abstract class BaseMaterial {
   }
 
   private _createPipeline(sampleCount: number, targetFormat: TextureFormat, depth: boolean): RenderPipeline {
+    const depthOnly = this._opts.depthOnly === true;
     return this.device.createRenderPipeline({
       label: this._opts.label ? `${this._opts.label}${sampleCount > 1 ? `-msaa${sampleCount}` : ""}` : undefined,
       program: this._program,
@@ -91,13 +113,15 @@ export abstract class BaseMaterial {
         depth === false
           ? null
           : { format: depthFormatOf(this.device, this._opts), depthWriteEnabled: true, depthCompare: "less-equal" },
-      targets: [
-        {
-          format: targetFormat,
-          writeMask: ColorWriteMask.ALL,
-          blend: this._opts.alphaBlend ? defaultBlendState() : undefined,
-        },
-      ],
+      targets: depthOnly
+        ? []
+        : [
+            {
+              format: targetFormat,
+              writeMask: ColorWriteMask.ALL,
+              blend: this._opts.alphaBlend ? defaultBlendState() : undefined,
+            },
+          ],
       multisample: { count: sampleCount },
     });
   }
@@ -106,11 +130,12 @@ export abstract class BaseMaterial {
     this.device = device;
     this._program = program;
     this._opts = opts;
+    this._receiveShadows = opts.receiveShadows !== false;
     const targetFormat = targetFormatOf(device, opts);
     const depth = opts.depth !== false;
     this.layout = device.createBindGroupLayout({
       label: opts.label ? `${opts.label}-layout` : undefined,
-      entries: [...defaultGroupEntries(), ...extraLayoutEntries],
+      entries: [...defaultGroupEntries({ shadows: this._receiveShadows }), ...extraLayoutEntries],
     });
     this.pipeline = this._createPipeline(1, targetFormat, depth);
     this._pipelinesBySamples.set(1, this.pipeline);
@@ -150,17 +175,37 @@ export abstract class BaseMaterial {
     return this._flushBlocks;
   }
 
+  /** 当前 bind group（调试/测试/自检用；建组之后可用） */
+  get bindGroupResource(): BindGroup {
+    return this.bindGroup;
+  }
+
+  /** bind group 布局条目（调试/测试用；例如确认声明了哪些 binding） */
+  get layoutEntries(): readonly BindGroupLayoutEntryDescriptor[] {
+    return this.layout.entries;
+  }
+
   /** 由子类提供 group 资源（含额外 texture/sampler）。 */
   protected abstract createBindGroup(): BindGroup;
 
-  /** 标准 bind group 条目：0=相机、1=模型（动态偏移）、2=材质、3=灯光。 */
+  /** 标准 bind group 条目：0=相机、1=模型（动态偏移）、2=材质、3=灯光、6..14=阴影。 */
   protected baseBindGroupEntries(): BindGroupEntryDescriptor[] {
-    return [
+    const entries: BindGroupEntryDescriptor[] = [
       { binding: 0, resource: this.cameraBlock.buffer },
       { binding: 1, resource: this.modelBlock.buffer, offset: 0, size: this.modelBlock.stride },
       { binding: 2, resource: this.materialBlock.buffer },
       { binding: 3, resource: this.lightsBlock.buffer },
     ];
+    if (!this._receiveShadows) return entries;
+    const shadows = shadowResources(this.device);
+    entries.push({ binding: SHADOW_BLOCK_BINDING, resource: shadows.block.buffer });
+    for (let i = 0; i < MAX_SHADOW_MAPS; i++) {
+      entries.push({ binding: SHADOW_TEXTURE_BINDING + i, resource: shadows.mapView(i) });
+    }
+    for (let i = 0; i < MAX_SHADOW_MAPS; i++) {
+      entries.push({ binding: SHADOW_SAMPLER_BINDING + i, resource: shadows.sampler });
+    }
+    return entries;
   }
 
   /**
@@ -182,6 +227,14 @@ export abstract class BaseMaterial {
    *               省略时使用默认光（环境 0.35 + 方向光 0.65），保证「不加灯也有光照」。
    */
   beginFrame(viewProjection: Mat4, cameraPos?: Vec3, lights?: LightsState): void {
+    // 阴影贴图池/尺寸变化后，bind group 引用的纹理视图会失效 → 重建
+    if (this._receiveShadows) {
+      const shadows = shadowResources(this.device);
+      if (shadows.version !== this._shadowVersion) {
+        this._shadowVersion = shadows.version;
+        this.assembleBindGroup();
+      }
+    }
     this.cameraBlock.setMat4("u_viewProj", viewProjection);
     this.cameraBlock.setVec4("u_cameraPos", cameraPos?.x ?? 0, cameraPos?.y ?? 0, cameraPos?.z ?? 0, 1);
     this.cameraBlock.flush();

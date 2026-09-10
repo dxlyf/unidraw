@@ -31,16 +31,20 @@ export class GLTexture extends Texture {
     }
     this.bindScratch();
     const params = textureGLParams(this.gl, desc.format);
-    if (GLTexture.isDepthFormatLocal(desc.format)) {
+    const depth = GLTexture.isDepthFormatLocal(desc.format);
+    if (depth) {
       this.gl.texStorage2D(this.gl.TEXTURE_2D, 1, params.internal, desc.width, desc.height);
     } else {
       this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
       this.gl.texImage2D(this.gl.TEXTURE_2D, 0, params.internal, desc.width, desc.height, 0, params.format, params.type, null);
-      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.NEAREST);
-      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.NEAREST);
-      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
-      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
     }
+    // 深度纹理也要显式设成 NEAREST/CLAMP：默认的 NEAREST_MIPMAP_LINEAR 在
+    // 「无 mip 链 + 未绑定 sampler 对象」时属于**不完整纹理**（采样恒为 (0,0,0,1)），
+    // 阴影贴图这类「纹理自带采样参数」的用法会直接读到全 1 → 阴影完全失效。
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.NEAREST);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.NEAREST);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
     device.register(this);
   }
 

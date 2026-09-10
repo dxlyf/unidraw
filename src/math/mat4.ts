@@ -234,6 +234,11 @@ export class Mat4 {
     return out;
   }
 
+  /**
+   * 正交投影。与 `perspective()` 一样使用 **ZO 约定**（NDC z ∈ [0,1]，
+   * near 平面 → 0，far 平面 → 1），因此两个后端的裁剪与深度测试行为一致；
+   * 需要 GL 的 `[-1,1]` 时可自行缩放（见 `perspectiveGL` 的说明）。
+   */
   static ortho(left: number, right: number, bottom: number, top: number, near: number, far: number): Mat4 {
     const out = new Mat4();
     const e = out.elements;
@@ -243,10 +248,10 @@ export class Mat4 {
     e.fill(0);
     e[0] = 2 * lr;
     e[5] = 2 * bt;
-    e[10] = 2 * nf;
+    e[10] = nf;
     e[12] = -(right + left) * lr;
     e[13] = -(top + bottom) * bt;
-    e[14] = (far + near) * nf;
+    e[14] = near * nf;
     e[15] = 1;
     return out;
   }

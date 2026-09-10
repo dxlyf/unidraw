@@ -20,6 +20,7 @@ import { Renderer, type RendererOptions } from "../render/Renderer.js";
 import { Camera } from "../render/Camera.js";
 import { Scene } from "../scene/Scene.js";
 import { SceneRenderer, type RenderStats } from "../scene/SceneRenderer.js";
+import { ShadowRenderer } from "../render/shadow/ShadowRenderer.js";
 import { InputManager, type InputManagerOptions } from "../interaction/InputManager.js";
 import { AnimationMixer } from "../animation/AnimationMixer.js";
 import { TweenManager } from "../animation/TweenManager.js";
@@ -48,6 +49,16 @@ export interface AppOptions extends RendererOptions {
   renderScene?: boolean;
   /** 内置 SceneRenderer 实例（缺省新建；便于外部读取 stats 或自定义剔除/排序） */
   sceneRenderer?: SceneRenderer;
+  /**
+   * 阴影：`true` = 用默认配置新建 `ShadowRenderer`；也可传入自己的实例
+   * （缺省 `undefined` = 不渲染阴影，即使灯上设了 `castShadow`）。
+   *
+   * 打开后每帧会在主 pass **之前**自动渲染所有 `castShadow` 灯（方向光/聚光）的阴影贴图，
+   * 内置受光材质自动接收阴影。
+   */
+  shadows?: boolean | ShadowRenderer;
+  /** 阴影贴图默认边长（`shadows: true` 时生效，默认 1024） */
+  shadowMapSize?: number;
 }
 
 export interface AppStats extends RenderStats {
@@ -79,8 +90,11 @@ export class App {
   readonly raycaster = new Raycaster();
   readonly stats: AppStats;
   readonly plugins: Plugin[] = [];
+  /** 阴影渲染器（`AppOptions.shadows` 打开时非 null） */
+  readonly shadows: ShadowRenderer | null;
 
   private readonly _options: AppOptions;
+  private readonly _ownsShadows: boolean;
   private readonly _frameCallbacks = new Set<FrameCallback>();
   private readonly _ctx: PluginContext;
   private _picker: ColorPicker | null = null;
@@ -115,6 +129,18 @@ export class App {
         ? new InputManager(renderer.canvas, typeof options.input === "object" ? options.input : {})
         : null;
     this.mixer = new AnimationMixer(this.scene);
+
+    // 阴影：true = 默认实例，ShadowRenderer = 复用外部实例，缺省不渲染
+    if (options.shadows instanceof ShadowRenderer) {
+      this.shadows = options.shadows;
+      this._ownsShadows = false;
+    } else if (options.shadows) {
+      this.shadows = new ShadowRenderer(this.device, { label: "app-shadows", mapSize: options.shadowMapSize ?? 1024 });
+      this._ownsShadows = true;
+    } else {
+      this.shadows = null;
+      this._ownsShadows = false;
+    }
 
     const size = this.device.presentSize();
     this.stats = {
@@ -281,6 +307,8 @@ export class App {
     this.tweens.update(step);
 
     // 3) 渲染通道
+    //    阴影贴图必须在主 pass 之前提交（WebGPU 禁止同一 submit 内既写又读同一张纹理）
+    if (this.shadows) this.shadows.renderAndSubmit(this.scene, this.camera, this.sceneRenderer);
     const pass = this.renderer.beginFrame();
     try {
       for (let i = 0; i < this.plugins.length; i++) this.plugins[i]!.beforeRender?.(this._ctx, pass);
@@ -348,6 +376,7 @@ export class App {
     this._frameCallbacks.clear();
     this.mixer.dispose();
     this.tweens.stopAll();
+    if (this._ownsShadows) this.shadows?.dispose();
     this._picker?.dispose();
     this._picker = null;
     this.input?.dispose();

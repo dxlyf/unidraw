@@ -168,7 +168,10 @@ export const ColorWriteMask = {
  */
 export function bindGroupLayoutCacheKey(desc: BindGroupLayoutDescriptor): string {
   const entries = desc.entries
-    .map((e) => `${e.binding}:${e.type}:${e.visibility}:${e.name ?? ""}:${e.hasDynamicOffset ? "dyn" : ""}`)
+    .map(
+      (e) =>
+        `${e.binding}:${e.type}:${e.visibility}:${e.name ?? ""}:${e.hasDynamicOffset ? "dyn" : ""}:${e.sampleType ?? ""}`,
+    )
     .sort()
     .join("|");
   return `[${entries}]`;
@@ -217,6 +220,15 @@ export interface RenderPipelineDescriptor {
 
 export type BindGroupEntryType = "uniform-buffer" | "texture" | "sampler";
 
+/**
+ * 纹理采样的样本类型（WebGPU `GPUTextureSampleType` 的子集）。
+ *
+ * - `"float"`（默认）：可过滤浮点纹理；
+ * - `"unfilterable-float"`：不可过滤（例如 `r32float`），只能用 nearest 采样器 / `textureLoad`；
+ * - `"depth"`：深度纹理（`texture_depth_2d`，配 `textureLoad` 手动比较，阴影贴图用）。
+ */
+export type TextureSampleType = "float" | "unfilterable-float" | "depth" | "sint" | "uint";
+
 export interface BindGroupLayoutEntryDescriptor {
   /** 与 WGSL @binding 一致；GLSL 后端按 name 映射 */
   binding: number;
@@ -230,6 +242,8 @@ export interface BindGroupLayoutEntryDescriptor {
    * （例如共享材质的逐物体模型矩阵），避免为每个物体创建 UBO/bind group。
    */
   hasDynamicOffset?: boolean;
+  /** 纹理样本类型（仅 `type: "texture"` 有意义；默认 `"float"`） */
+  sampleType?: TextureSampleType;
 }
 
 export interface BindGroupLayoutDescriptor {

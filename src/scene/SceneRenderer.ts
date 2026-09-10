@@ -9,6 +9,7 @@
 
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { Camera } from "../render/Camera.js";
+import type { Mat4 } from "../math/mat4.js";
 import { Mesh } from "../render/Mesh.js";
 import { Frustum } from "./Frustum.js";
 import type { Node3D } from "./Node3D.js";
@@ -44,6 +45,13 @@ export interface SceneRenderOptions {
    * 此时材质退化为默认光，等价于「场景里没有任何灯」）。
    */
   lights?: LightsState | null;
+  /**
+   * 用这个视投影矩阵做视锥剔除（缺省用 `camera.viewProjection`）。
+   *
+   * 光源视角的 pass（阴影贴图）用它把剔除换成「光源视锥」，
+   * 从而复用同一套世界矩阵更新/收集逻辑。
+   */
+  viewProjection?: Mat4;
 }
 
 interface Item {
@@ -88,7 +96,7 @@ export class SceneRenderer {
 
     // 2) 视锥
     const useFrustum = options.frustumCulling ?? this.frustumCulling;
-    if (useFrustum) this.frustum.setFromProjectionMatrix(camera.viewProjection);
+    if (useFrustum) this.frustum.setFromProjectionMatrix(options.viewProjection ?? camera.viewProjection);
     camera.getEyePosition(this._eye);
 
     // 3) 收集

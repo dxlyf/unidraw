@@ -8,6 +8,7 @@
 
 import { Node3D } from "../../scene/Node3D.js";
 import { Color } from "../../math/color.js";
+import { ShadowSettings, type ShadowOptions } from "../shadow/ShadowSettings.js";
 
 let nextLightId = 1;
 
@@ -17,11 +18,28 @@ export abstract class Light extends Node3D {
   readonly color: Color;
   /** 强度（与颜色相乘） */
   intensity: number;
+  /**
+   * 是否投射阴影（默认 false）。
+   *
+   * 打开后需要 `SceneRenderer` 侧配套一个 `ShadowRenderer`（或 `App` 的阴影选项）
+   * 来渲染阴影贴图；只设 `castShadow` 而不渲染阴影 pass 不会有任何效果。
+   * 目前支持**方向光**与**聚光**（一次着色最多 `MAX_SHADOW_MAPS` 张，点光不支持）。
+   */
+  castShadow = false;
+  /** 阴影参数（`castShadow = true` 后生效） */
+  readonly shadow = new ShadowSettings();
 
   protected constructor(color: Color = new Color(1, 1, 1, 1), intensity = 1) {
     super();
     this.color = color.clone();
     this.intensity = intensity;
+  }
+
+  /** 便捷：打开阴影并设置参数（`sun.setShadow({ mapSize: 2048 })`） */
+  setShadow(options: ShadowOptions = {}): this {
+    this.castShadow = options.enabled !== false;
+    Object.assign(this.shadow, new ShadowSettings(options));
+    return this;
   }
 
   /** 设置颜色（十六进制字符串或 Color） */

@@ -84,7 +84,20 @@ material.beginFrame(camera.viewProjection, camera.getEyePosition(), lights);
 > 想要“真正的黑暗”就往场景里放一盏灯再把它 `visible = false`——
 > 只要存在灯节点就不会回退默认光。
 
-## 4. 性能
+## 4. 阴影
+
+灯上设 `castShadow = true` 即可投射阴影（方向光/聚光），参数见 `light.shadow`；
+每帧需要在主 pass 之前调用 `ShadowRenderer.renderAndSubmit()`（或 `App` 的 `shadows: true`）。
+实现细节与排查表见 [shadows.md](shadows.md)。
+
+```ts
+const sun = new DirectionalLight(new Vec3(-0.5, -1, -0.4), "#fff3d6", 1.0);
+sun.castShadow = true;
+sun.shadow.mapSize = 2048;
+scene.add(sun);
+```
+
+## 5. 性能
 
 - 灯光每帧只收集/打包一次（`collectLights` 遍历一次场景图，零分配），
   每个材质每帧只上传一块 608B 的 UBO；
@@ -93,9 +106,11 @@ material.beginFrame(camera.viewProjection, camera.getEyePosition(), lights);
 - shader 内是固定上限的 `for` 循环 + `u_counts` 提前 `break`（比动态长度循环更稳，
   编译器也不会展开成巨量指令）；
 - 灯很多时建议：合并同色点光、给点光设 `distance` 缩小影响范围、
-  或按需切换 `visible`（示例里 1/2/3/4/0/5 就是干这个的）。
+  或按需切换 `visible`（示例里 1/2/3/4/0/5 就是干这个的）；
+- 阴影会多出「每个投影灯一趟深度 pass」的开销：贴图越大越贵，建议 1024/2048；
+  没有阴影时着色器立即返回（`u_shadowMeta.x = 0`），几乎没有额外成本。
 
-## 5. 陷阱
+## 6. 陷阱
 
 - **方向光的 `direction` 是「光传播的方向」**（从光源射向场景），不是“指向光源”；
   从左上往右下打光写 `(0.35, -0.75, -0.55)`；

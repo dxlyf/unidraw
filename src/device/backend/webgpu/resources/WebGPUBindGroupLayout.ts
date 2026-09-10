@@ -15,8 +15,12 @@ export class WebGPUBindGroupLayout extends BindGroupLayout {
       };
       if (e.type === "uniform-buffer") {
         base.buffer = { type: "uniform", hasDynamicOffset: e.hasDynamicOffset === true };
-      } else if (e.type === "texture") base.texture = { sampleType: "float", viewDimension: "2d" };
-      else base.sampler = { type: "filtering" };
+      } else if (e.type === "texture") {
+        base.texture = {
+          sampleType: (e.sampleType ?? "float") as GPUTextureSampleType,
+          viewDimension: "2d",
+        };
+      } else base.sampler = { type: "filtering" };
       return base;
     });
     this.gpuLayout = device.gpu.createBindGroupLayout({ label: desc.label, entries });

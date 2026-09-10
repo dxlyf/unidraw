@@ -69,6 +69,14 @@ export interface FullScreenPassOptions {
   targetFormat?: TextureFormat;
   /** 额外输入纹理数量（会占用 binding 3 起的位置） */
   extraTextureCount?: number;
+  /**
+   * 用 NEAREST 采样（默认 false = LINEAR）。
+   *
+   * 读深度贴图/整数纹理时必须开：WebGL2 下「线性采样器 + 深度纹理」属于
+   * **不完整纹理**（采样结果未定义）；`texelFetch` 虽然不看采样器状态，
+   * 但纹理完整性检查仍会生效。
+   */
+  nearest?: boolean;
 }
 
 export class FullScreenPass implements PostEffect {
@@ -116,8 +124,8 @@ export class FullScreenPass implements PostEffect {
       label: `postfx-${options.name}-sampler`,
       addressModeU: "clamp-to-edge",
       addressModeV: "clamp-to-edge",
-      magFilter: "linear",
-      minFilter: "linear",
+      magFilter: options.nearest ? "nearest" : "linear",
+      minFilter: options.nearest ? "nearest" : "linear",
       mips: false,
     });
     this.pipeline = device.createRenderPipeline({

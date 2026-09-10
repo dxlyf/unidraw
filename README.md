@@ -17,6 +17,7 @@
 | 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包；支持**动态偏移环形 UBO**（共享材质逐物体矩阵，一次绘制换一个槽） |
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
 | 灯光 | `AmbientLight` / `DirectionalLight`(平行光) / `PointLight` / `SpotLight`（锥角+半影），灯是场景图节点、可动画驱动；每帧自动收集打包进 `LightsBlock`（方向 4 / 点 8 / 聚 4，无灯时使用与历史等价的默认光） |
+| 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 纹素对齐）/ 聚光（透视）各一张深度贴图，3×3 PCF 软阴影；`mapSize`/`bias`/`normalBias`/`radius` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule**；闭合几何保证**无边界边（没有洞）/无零面积三角形/无非流形边**，体积与解析值一致（单测守护） |
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
 | 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
@@ -26,8 +27,8 @@
 | 离屏与后处理 | `RenderTarget`（格式/深度/**MSAA**/回读，三后端统一）+ `EffectComposer` 效果链（场景目标可选 MSAA → ping-pong 效果 → 呈现）；内置 `CopyPass`/`ToneMapPass`(ACES 等 4 种)/`BloomPass`/`VignettePass`/`GrayscalePass`/`ShaderPass`，自定义效果只要一对 fragment 源码 |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / App·插件 / 后处理（`node --test`，108 个用例） |
-| 示例 | 14 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**后处理**、**App+插件**与 3 个**性能档位**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / App·插件（`node --test`，120 个用例） |
+| 示例 | 15 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**App+插件**与 3 个**性能档位**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -224,6 +225,31 @@ composer.render((pass) => sceneRenderer.render(pass, scene, camera));
 
 详见 [docs/postfx.md](docs/postfx.md)。
 
+### 阴影（Shadow Map，`src/render/shadow`）
+
+```ts
+import { DirectionalLight, ShadowRenderer, Vec3 } from "unidraw";
+
+const sun = new DirectionalLight(new Vec3(-0.5, -1, -0.4), "#fff3d6", 1.0);
+sun.castShadow = true;        // 打开阴影；sun.shadow.mapSize / bias / radius 可调
+scene.add(sun);
+
+const shadows = new ShadowRenderer(device);
+shadows.renderAndSubmit(scene, camera, sceneRenderer);   // 每帧：必须在主 pass 之前提交
+sceneRenderer.render(renderer.beginFrame(), scene, camera);
+renderer.endFrame();
+
+// 用 App 时更省事：App.create(canvas, { shadows: true })
+```
+
+- 方向光用**正交自动拟合**（可见物体包围球 + 纹素对齐），聚光用透视拟合（视场角 = 外锥角）；
+- 阴影贴图是 `depth32float` 深度纹理，着色器用 `texelFetch`/`textureLoad` 手动比较
+  + 3×3 PCF —— 不需要比较采样器/扩展，两个后端结果一致；
+- 一次着色最多 4 张（`MAX_SHADOW_MAPS`），超出的投影灯计入 `shadows.stats.skipped`；
+- 示例 `examples/shadows` 自带 `SHADOW_SELFTEST`（阴影比例、阴影是否随光移动、整体曝光不变）。
+
+详见 [docs/shadows.md](docs/shadows.md)。
+
 ### 应用门面与插件（`src/app`）
 
 ```ts
@@ -306,13 +332,15 @@ src/
     （materialCommon.ts、shaders/*、primitives/*、texture/*）
     postfx/    EffectComposer + FullScreenPass（效果契约）+ 每种效果一个文件
                （CopyPass/ToneMapPass/BloomPass/VignettePass/GrayscalePass/ShaderPass）
+    shadow/    ShadowRenderer + ShadowMap/ShadowCamera/ShadowState/ShadowResources
+               + ShadowDepthMaterial（只写深度的材质）
   render2d/    Canvas2D 完整 2D：路径/贝塞尔/arc/圆角矩形、填充描边、渐变、
                变换、文本、裁剪（WebGL2/WebGPU 共用）
                path.ts / style.ts / renderer2d.ts 为 barrel，实现拆到
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      14 个示例 + common/（demo 引导、bench 测量框架）
+examples/      15 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -343,6 +371,7 @@ docs/          中文文档（见下）
 - [场景图 / 交互 / 拾取](docs/picking.md)
 - [动画（关键帧 · Mixer · Tween）](docs/animation.md)
 - [灯光（环境光/方向光/点光/聚光）](docs/lighting.md)
+- [阴影（Shadow Map）](docs/shadows.md)
 - [离屏渲染与后处理（RenderTarget · MSAA · EffectComposer）](docs/postfx.md)
 - [App 门面与插件](docs/app.md)
 - [着色器写作指南](docs/shader-guide.md)
@@ -352,7 +381,7 @@ docs/          中文文档（见下）
 
 ## 路线图（可能的后续）
 
-- 阴影（Shadow Map：方向光/聚光/点光 + PCF）
+- 点光阴影（cube map；WebGL2 需要每面各跑一趟）
 - 计算管线 / 存储缓冲 / indirect draw
 - 实例化合批（`InstancedMesh`）与更激进的命令编码去 GC
 - 纹理压缩格式、mipmap 自动生成（WebGL2 `generateMipmaps`、`maxAnisotropy`）
