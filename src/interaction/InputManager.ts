@@ -89,7 +89,12 @@ export class InputManager {
   private readonly _pointers = new Map<number, PointerState>();
   private readonly _keys = new Set<string>();
   private _disposed = false;
-  private _lastClickTime = 0;
+  /**
+   * 上一次 click 的时间戳。
+   * 初值必须是 -Infinity：`performance.now()` 的原点可能是页面/进程启动
+   * （Node、刚加载的页面都接近 0），若用 0 则「第一次点击」会被误判成双击。
+   */
+  private _lastClickTime = Number.NEGATIVE_INFINITY;
   private _teardown: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, options: InputManagerOptions = {}) {
@@ -215,7 +220,7 @@ export class InputManager {
           const now = performance.now();
           if (now - this._lastClickTime <= this._options.doubleClickInterval) {
             this._emit("dblclick", this._info("dblclick", e));
-            this._lastClickTime = 0;
+            this._lastClickTime = Number.NEGATIVE_INFINITY;
           } else {
             this._lastClickTime = now;
           }
