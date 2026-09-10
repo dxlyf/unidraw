@@ -158,7 +158,10 @@ export const ColorWriteMask = {
  * （避免大量同构材质把有限的 binding 资源耗尽）。
  */
 export function bindGroupLayoutCacheKey(desc: BindGroupLayoutDescriptor): string {
-  const entries = desc.entries.map((e) => `${e.binding}:${e.type}:${e.visibility}:${e.name ?? ""}`).sort().join("|");
+  const entries = desc.entries
+    .map((e) => `${e.binding}:${e.type}:${e.visibility}:${e.name ?? ""}:${e.hasDynamicOffset ? "dyn" : ""}`)
+    .sort()
+    .join("|");
   return `[${entries}]`;
 }
 
@@ -207,6 +210,12 @@ export interface BindGroupLayoutEntryDescriptor {
   visibility: ShaderStageFlags;
   /** 着色器名称（GLSL uniform/UBO block 名；WGSL var 名提示） */
   name?: string;
+  /**
+   * uniform buffer 使用「动态偏移」（WebGPU `hasDynamicOffset` / WebGL2 `bindBufferRange`）。
+   * 用于「同一个 bind group + 同一个 buffer，逐次绘制换一段数据」的高频场景
+   * （例如共享材质的逐物体模型矩阵），避免为每个物体创建 UBO/bind group。
+   */
+  hasDynamicOffset?: boolean;
 }
 
 export interface BindGroupLayoutDescriptor {
@@ -219,6 +228,10 @@ export type BindGroupResource = Buffer | Sampler | TextureView;
 export interface BindGroupEntryDescriptor {
   binding: number;
   resource: BindGroupResource;
+  /** 资源在 buffer 内的字节偏移（动态偏移 entry 的基准偏移） */
+  offset?: number;
+  /** 绑定区间字节数（缺省到 buffer 末尾；动态偏移 UBO 建议显式给出 block 大小） */
+  size?: number;
 }
 
 export interface BindGroupDescriptor {

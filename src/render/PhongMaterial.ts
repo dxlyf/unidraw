@@ -78,11 +78,7 @@ export class PhongMaterial extends BaseMaterial {
     return this.device.createBindGroup({
       label: "phong-group",
       layout: this.layout,
-      entries: [
-        { binding: 0, resource: this.cameraBlock.buffer },
-        { binding: 1, resource: this.modelBlock.buffer },
-        { binding: 2, resource: this.materialBlock.buffer },
-      ],
+      entries: this.baseBindGroupEntries(),
     });
   }
 }

@@ -31,10 +31,15 @@ export class RenderPassEncoder {
     this._boundPipeline = pipeline;
   }
 
-  setBindGroup(index: number, group: BindGroup): void {
+  /**
+   * 绑定 bind group。
+   * @param offsets 动态偏移数组：与布局中 `hasDynamicOffset` 的 entry 顺序一一对应
+   *                （语义与 WebGPU `setBindGroup(index, group, dynamicOffsets)` 一致）。
+   */
+  setBindGroup(index: number, group: BindGroup, offsets?: readonly number[] | null): void {
     this.assertActive();
     assert(index >= 0 && index < 4, `bind group index ${index} 超出范围`);
-    this._ops.push({ k: "setBindGroup", index, group });
+    this._ops.push({ k: "setBindGroup", index, group, offsets: offsets && offsets.length > 0 ? offsets : null });
   }
 
   setVertexBuffer(slot: number, buffer: Buffer | null, offset = 0): void {

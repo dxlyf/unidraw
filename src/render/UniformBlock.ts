@@ -21,6 +21,13 @@ export interface UniformBlockOptions {
   fields: UniformField[];
   /** 每帧重写时建议传入 */
   dynamic?: boolean;
+  /**
+   * 环形槽数量（> 1 时启用「动态偏移 UBO」）：
+   * buffer 被划分为 slots 个对齐槽，每槽一个 block，
+   * 通过 `setBindGroup(index, group, [slot * stride])` 选择实际读取的槽。
+   * 用于共享材质逐物体更新矩阵的场景，避免每物体一个 buffer/bind group。
+   */
+  slots?: number;
 }
 
 export class UniformBlock {
@@ -28,6 +35,10 @@ export class UniformBlock {
   readonly layout: Std140Layout;
   readonly buffer: Buffer;
   readonly label: string | undefined;
+  /** 单个槽的字节跨度（= block 大小按 minUniformBufferOffsetAlignment 对齐） */
+  readonly stride: number;
+  /** 槽数量（缺省 1，即普通 UBO） */
+  readonly slots: number;
   private readonly _f32: Float32Array;
   private readonly _bytes: ArrayBuffer;
 
@@ -35,11 +46,14 @@ export class UniformBlock {
     this.device = device;
     this.label = options.label;
     this.layout = std140Layout(options.fields);
+    this.slots = Math.max(1, Math.floor(options.slots ?? 1));
+    const alignment = Math.max(1, device.limits.minUniformBufferOffsetAlignment ?? 256);
+    this.stride = this.slots > 1 ? align(this.layout.size, alignment) : this.layout.size;
     this._bytes = new ArrayBuffer(this.layout.size);
     this._f32 = new Float32Array(this._bytes);
     this.buffer = device.createBuffer({
       label: options.label ? `${options.label}-ubo` : undefined,
-      size: this.layout.size,
+      size: this.stride * this.slots,
       usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
     });
   }
@@ -128,8 +142,18 @@ export class UniformBlock {
     }
   }
 
-  /** 把整块 CPU 数据写入 GPU 缓冲。 */
+  /** 把整块 CPU 数据写入 GPU 缓冲（槽 0 / 普通 UBO）。 */
   flush(): void {
     this.buffer.write(this._bytes);
   }
+
+  /** 把当前 CPU 数据写入指定槽（动态偏移 UBO）。 */
+  flushSlot(slot: number): void {
+    assert(slot >= 0 && slot < this.slots, `uniform 槽位 ${slot} 超出范围（slots=${this.slots}）`);
+    this.buffer.write(this._bytes, slot * this.stride);
+  }
+}
+
+function align(value: number, alignment: number): number {
+  return Math.ceil(value / alignment) * alignment;
 }

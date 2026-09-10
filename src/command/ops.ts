@@ -33,7 +33,7 @@ export type CommandOp =
     }
   | { k: "endRenderPass" }
   | { k: "setPipeline"; pipeline: RenderPipeline }
-  | { k: "setBindGroup"; index: number; group: BindGroup }
+  | { k: "setBindGroup"; index: number; group: BindGroup; offsets: readonly number[] | null }
   | { k: "setVertexBuffer"; slot: number; buffer: Buffer | null; offset: number }
   | { k: "setIndexBuffer"; buffer: Buffer | null; format: IndexFormat; offset: number }
   | { k: "draw"; vertexCount: number; instanceCount: number; firstVertex: number; firstInstance: number }

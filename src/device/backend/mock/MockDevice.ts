@@ -16,6 +16,7 @@ import { MockRenderPipeline } from "./resources/MockRenderPipeline.js";
 import { MockSampler } from "./resources/MockSampler.js";
 import { MockTexture } from "./resources/MockTexture.js";
 import { clampByte } from "./gpuUtils.js";
+import { resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
 
 export class MockDevice extends Device {
   private _drawCalls: MockDrawCall[] = [];
@@ -26,7 +27,13 @@ export class MockDevice extends Device {
   }
 
   override get limits(): DeviceLimits {
-    return { maxVertexAttributes: 16, maxTextureUnits: 16, maxUniformBufferBindings: 16, maxTextureSize: 4096 };
+    return {
+      maxVertexAttributes: 16,
+      maxTextureUnits: 16,
+      maxUniformBufferBindings: 16,
+      maxTextureSize: 4096,
+      minUniformBufferOffsetAlignment: 256,
+    };
   }
 
   // ---- 资源创建 -----------------------------------------------------------
@@ -84,6 +91,20 @@ export class MockDevice extends Device {
     const mock = texture as unknown as MockTexture;
     if (!mock.pixels) return null;
     return new Uint8Array(mock.pixels);
+  }
+
+  /** 统一回读接口：返回左上原点、紧凑 8bit RGBA 的子区域。 */
+  override async readTexturePixels(texture: Texture, options: ReadPixelsOptions = {}): Promise<Uint8Array> {
+    const mock = texture as unknown as MockTexture;
+    assert(mock.pixels, "Mock 纹理没有 CPU 像素（深度/浮点格式不可回读）");
+    const rect = resolveReadRect(texture, options);
+    const out = new Uint8Array(rect.width * rect.height * 4);
+    for (let row = 0; row < rect.height; row++) {
+      const src = ((rect.y + row) * texture.width + rect.x) * 4;
+      out.set(mock.pixels.subarray(src, src + rect.width * 4), row * rect.width * 4);
+    }
+    if (rect.bgra) swizzleBgraToRgbaInPlace(out);
+    return out;
   }
 
   // ---- 命令执行 -----------------------------------------------------------

@@ -17,6 +17,7 @@ import { GLRenderPipeline } from "./resources/GLRenderPipeline.js";
 import { GLSampler } from "./resources/GLSampler.js";
 import { GLTexture } from "./resources/GLTexture.js";
 import { attributeGLType, describeRenderer } from "./glUtils.js";
+import { flipRowsInPlace, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
 
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ export class WebGL2Device extends Device {
         maxTextureUnits: gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) as number,
         maxUniformBufferBindings: gl.getParameter(gl.MAX_UNIFORM_BUFFER_BINDINGS) as number,
         maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+        minUniformBufferOffsetAlignment:
+          (gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) as number | null) ?? 256,
       };
     }
     return this._limits;
@@ -153,6 +156,26 @@ export class WebGL2Device extends Device {
     return "rgba8unorm";
   }
 
+  /**
+   * 纹理回读：绑定临时 FBO → `readPixels` → 翻转 Y（GL 原点在左下）。
+   * 注意：会临时切换绑定的 framebuffer，读取后恢复。
+   */
+  override async readTexturePixels(texture: Texture, options: ReadPixelsOptions = {}): Promise<Uint8Array> {
+    const gl = this.gl;
+    const rect = resolveReadRect(texture, options);
+    const tex = texture as GLTexture;
+    const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const fb = this.getFramebuffer(tex, null);
+    const out = new Uint8Array(rect.width * rect.height * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    // GL 的 readPixels 原点在左下：把「左上 y」换算成 GL 的行起点
+    gl.readPixels(rect.x, texture.height - (rect.y + rect.height), rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    flipRowsInPlace(out, rect.width, rect.height);
+    if (rect.bgra) swizzleBgraToRgbaInPlace(out);
+    return out;
+  }
+
   // -------------------------------------------------------------------------
   // 命令执行
   // -------------------------------------------------------------------------
@@ -241,16 +264,19 @@ export class WebGL2Device extends Device {
         case "setPipeline": {
           assert(inPass, "setPipeline 必须在 render pass 内");
           const p = op.pipeline as GLRenderPipeline;
-          gl.useProgram(p.glProgram.linkedProgram());
-          this.applyPipelineState(p);
-          currentPipeline = p;
+          // 状态最小化：同一 pass 内重复设置同一管线时跳过（useProgram + 状态设置）
+          if (currentPipeline !== p) {
+            gl.useProgram(p.glProgram.linkedProgram());
+            this.applyPipelineState(p);
+            currentPipeline = p;
+          }
           break;
         }
         case "setBindGroup": {
           assert(inPass, "setBindGroup 必须在 render pass 内");
           const bg = op.group as GLBindGroup | null;
           groups[op.index] = bg;
-          if (bg) this.bindGroup(bg);
+          if (bg) this.bindGroup(bg, op.offsets);
           break;
         }
         case "setVertexBuffer": {
@@ -346,16 +372,30 @@ export class WebGL2Device extends Device {
     }
   }
 
-  private bindGroup(bg: GLBindGroup): void {
+  private bindGroup(bg: GLBindGroup, offsets: readonly number[] | null): void {
     const gl = this.gl;
     const layout = bg.descriptor.layout as GLBindGroupLayout;
-    const byBinding = new Map(bg.descriptor.entries.map((e) => [e.binding, e.resource]));
-    // UBO
+    const byBinding = new Map(bg.descriptor.entries.map((e) => [e.binding, e]));
+    // UBO（动态偏移 entry 按顺序消费 offsets；无偏移时退化为 bindBufferBase）
     let uboIdx = 0;
+    let dynIdx = 0;
     for (const entry of layout.entries) {
       if (entry.type !== "uniform-buffer") continue;
-      const res = byBinding.get(entry.binding);
-      if (res instanceof Buffer) gl.bindBufferBase(gl.UNIFORM_BUFFER, layout.uboPoints[uboIdx]!, (res as GLBuffer).glBuffer);
+      const binding = byBinding.get(entry.binding);
+      const res = binding?.resource;
+      if (res instanceof Buffer) {
+        const glBuffer = (res as GLBuffer).glBuffer;
+        const dynamic = entry.hasDynamicOffset === true;
+        const dynOffset = dynamic ? (offsets?.[dynIdx] ?? 0) : 0;
+        if (dynamic) dynIdx++;
+        const base = binding?.offset ?? 0;
+        if (dynamic || binding?.offset || binding?.size) {
+          const size = binding?.size ?? Math.max(0, res.size - base);
+          gl.bindBufferRange(gl.UNIFORM_BUFFER, layout.uboPoints[uboIdx]!, glBuffer, base + dynOffset, size);
+        } else {
+          gl.bindBufferBase(gl.UNIFORM_BUFFER, layout.uboPoints[uboIdx]!, glBuffer);
+        }
+      }
       uboIdx++;
     }
     // texture + sampler（按 entry 顺序配对）
@@ -363,11 +403,11 @@ export class WebGL2Device extends Device {
     const samplers = layout.entries.filter((e) => e.type === "sampler");
     textures.forEach((texEntry, i) => {
       const unit = layout.textureUnits[i]!;
-      const res = byBinding.get(texEntry.binding);
+      const res = byBinding.get(texEntry.binding)?.resource;
       gl.activeTexture(gl.TEXTURE0 + unit);
       if (res instanceof TextureView) gl.bindTexture(gl.TEXTURE_2D, (res.texture as GLTexture).glTexture);
       else gl.bindTexture(gl.TEXTURE_2D, null);
-      const samRes = samplers[i] ? byBinding.get(samplers[i]!.binding) : undefined;
+      const samRes = samplers[i] ? byBinding.get(samplers[i]!.binding)?.resource : undefined;
       if (samRes instanceof Sampler) gl.bindSampler(unit, (samRes as GLSampler).glSampler);
       else gl.bindSampler(unit, null);
     });

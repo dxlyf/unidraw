@@ -22,6 +22,7 @@ import {
   Texture,
 } from "./resources.js";
 import type { BackendKind, TextureFormat } from "../gpu/types.js";
+import type { ReadPixelsOptions } from "./readback.js";
 
 export interface DeviceInfo {
   kind: BackendKind;
@@ -37,6 +38,12 @@ export interface DeviceLimits {
   maxUniformBufferBindings: number;
   maxTextureSize: number;
   maxCanvasSize?: number;
+  /**
+   * uniform buffer 动态偏移对齐（字节）。为动态偏移 UBO 分配环形槽时，
+   * 相邻槽的间距必须是它的整数倍（WebGPU ≈ 256，WebGL2 由
+   * `UNIFORM_BUFFER_OFFSET_ALIGNMENT` 决定）。
+   */
+  minUniformBufferOffsetAlignment?: number;
 }
 
 /**
@@ -52,12 +59,28 @@ export abstract class Device extends ResourceBase {
   readonly canvas: HTMLCanvasElement | null;
   readonly info: DeviceInfo;
   private readonly _resources: ResourceBase[] = [];
+  private _submitCount = 0;
 
   protected constructor(kind: BackendKind, canvas: HTMLCanvasElement | null, info: DeviceInfo) {
     super(info.name);
     this.kind = kind;
     this.canvas = canvas;
     this.info = info;
+  }
+
+  /**
+   * 已提交次数。后端的 `submit()` 会 +1。
+   *
+   * 用途：判断「上一次提交是否已经发生」——提交之后写 buffer 才保证在队列时间线上
+   * 晚于上一次提交的绘制，因此可以安全复用动态偏移 UBO 的槽位。
+   */
+  get submitCount(): number {
+    return this._submitCount;
+  }
+
+  /** @internal 由后端在真正提交后调用。 */
+  protected markSubmitted(): void {
+    this._submitCount++;
   }
 
   // -------------------------------------------------------------------------
@@ -92,6 +115,7 @@ export abstract class Device extends ResourceBase {
     for (const buffer of commandBuffers) {
       this.executeOps(buffer.ops);
     }
+    this.markSubmitted();
   }
 
   /** 等待本次提交的 GPU 工作完成。WebGL2/Mock 立即/下一微任务完成。 */
@@ -102,6 +126,15 @@ export abstract class Device extends ResourceBase {
 
   /** canvas 颜色格式；无 canvas 时返回 null。 */
   abstract canvasFormat(): TextureFormat | null;
+
+  /**
+   * 把纹理像素回读到 CPU（左上原点、紧凑 8bit RGBA）。
+   *
+   * 用途：GPU 颜色拾取、离屏渲染结果校验、截图/导出。
+   * 仅支持 8bit 颜色纹理（rgba8unorm / bgra8unorm 系列）；
+   * WebGPU 需要纹理带 `COPY_SRC`，WebGL2 通过临时 FBO 读取。
+   */
+  abstract readTexturePixels(texture: Texture, options?: ReadPixelsOptions): Promise<Uint8Array>;
 
   // -------------------------------------------------------------------------
   // 内部

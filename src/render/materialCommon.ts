@@ -49,10 +49,19 @@ export function targetFormatOf(device: Device, opts: MaterialOptions): TextureFo
   return (device.canvasFormat?.() ?? "rgba8unorm") as TextureFormat;
 }
 
-export function defaultGroupEntries(): { binding: number; type: "uniform-buffer"; visibility: number; name: string }[] {
+/**
+ * 标准 group 布局：0=相机 UBO、1=模型 UBO（动态偏移，逐物体换槽）、2=材质 UBO。
+ */
+export function defaultGroupEntries(): {
+  binding: number;
+  type: "uniform-buffer";
+  visibility: number;
+  name: string;
+  hasDynamicOffset?: boolean;
+}[] {
   return [
     { binding: 0, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "CameraBlock" },
-    { binding: 1, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "ModelBlock" },
+    { binding: 1, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "ModelBlock", hasDynamicOffset: true },
     { binding: 2, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "MaterialBlock" },
   ];
 }

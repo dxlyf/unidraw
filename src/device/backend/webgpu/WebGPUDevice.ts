@@ -6,6 +6,7 @@ import { bindGroupLayoutCacheKey } from "../../descriptors.js";
 import type { CommandBuffer } from "../../../command/encoder.js";
 import type { CommandOp, DepthStencilAttachmentOp } from "../../../command/ops.js";
 import type { TextureFormat } from "../../../gpu/types.js";
+import { TextureUsage } from "../../../gpu/types.js";
 import type { WebGPUDeviceOptions } from "./types.js";
 import { WEBGPU_INTERNAL_DEPTH_FORMAT } from "./constants.js";
 import { WebGPUBindGroup } from "./resources/WebGPUBindGroup.js";
@@ -17,6 +18,12 @@ import { WebGPUSampler } from "./resources/WebGPUSampler.js";
 import { WebGPUTexture } from "./resources/WebGPUTexture.js";
 import { WebGPUTextureView } from "./resources/WebGPUTextureView.js";
 import { adapterName, colorAttachmentState } from "./gpuUtils.js";
+import { repackRows, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
+
+/** WebGPU `copyTextureToBuffer` 要求 bytesPerRow 为 256 的倍数。 */
+function align256(value: number): number {
+  return Math.ceil(value / 256) * 256;
+}
 
 export class WebGPUDevice extends Device {
   readonly gpu: GPUDevice;
@@ -78,6 +85,7 @@ export class WebGPUDevice extends Device {
         maxTextureUnits: 64,
         maxUniformBufferBindings: gpu.limits.maxUniformBuffersPerShaderStage * 4,
         maxTextureSize: gpu.limits.maxTextureDimension2D,
+        minUniformBufferOffsetAlignment: gpu.limits.minUniformBufferOffsetAlignment,
       };
     }
     return this._limits;
@@ -127,6 +135,40 @@ export class WebGPUDevice extends Device {
     return this.canvasFormatNative as TextureFormat;
   }
 
+  /**
+   * 纹理回读：`copyTextureToBuffer` + `mapAsync`。
+   * WebGPU 要求每行字节数为 256 的倍数，因此回读缓冲带行间距，之后重排为紧凑 RGBA。
+   */
+  override async readTexturePixels(texture: Texture, options: ReadPixelsOptions = {}): Promise<Uint8Array> {
+    const rect = resolveReadRect(texture, options);
+    assert((texture.usage & TextureUsage.COPY_SRC) !== 0, "readTexturePixels 需要纹理带 COPY_SRC 用途");
+    const tex = texture as WebGPUTexture;
+    const tight = rect.width * 4;
+    const bytesPerRow = align256(tight);
+    const buffer = this.gpu.createBuffer({
+      label: "unidraw-readback",
+      size: bytesPerRow * rect.height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.gpu.createCommandEncoder({ label: "unidraw-readback" });
+    encoder.copyTextureToBuffer(
+      { texture: tex.gpuTexture, origin: { x: rect.x, y: rect.y } },
+      { buffer, bytesPerRow, rowsPerImage: rect.height },
+      { width: rect.width, height: rect.height },
+    );
+    this.gpu.queue.submit([encoder.finish()]);
+    this.markSubmitted();
+
+    await buffer.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buffer.getMappedRange());
+    const out = new Uint8Array(tight * rect.height);
+    repackRows(src, bytesPerRow, rect.width, rect.height, out);
+    buffer.unmap();
+    buffer.destroy();
+    if (rect.bgra) swizzleBgraToRgbaInPlace(out);
+    return out;
+  }
+
   // ---- 提交 ---------------------------------------------------------------
 
   override submit(commandBuffers: readonly CommandBuffer[]): void {
@@ -137,12 +179,14 @@ export class WebGPUDevice extends Device {
       this.encodeOps(native, buffer.ops);
     }
     this.gpu.queue.submit([native.finish()]);
+    this.markSubmitted();
   }
 
   protected override executeOps(ops: readonly CommandOp[]): void {
     const native = this.gpu.createCommandEncoder();
     this.encodeOps(native, ops);
     this.gpu.queue.submit([native.finish()]);
+    this.markSubmitted();
   }
 
   private encodeOps(native: GPUCommandEncoder, ops: readonly CommandOp[]): void {
@@ -182,7 +226,10 @@ export class WebGPUDevice extends Device {
         case "setBindGroup": {
           assert(pass, "setBindGroup 必须在 render pass 内");
           const group = (op.group as WebGPUBindGroup | null)?.gpuBindGroup;
-          if (group) pass.setBindGroup(op.index, group);
+          if (group) {
+            if (op.offsets && op.offsets.length > 0) pass.setBindGroup(op.index, group, op.offsets as number[]);
+            else pass.setBindGroup(op.index, group);
+          }
           break;
         }
         case "setVertexBuffer": {

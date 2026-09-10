@@ -94,9 +94,7 @@ export class TextureMaterial extends BaseMaterial {
       label: "texturematerial-group",
       layout: this.layout,
       entries: [
-        { binding: 0, resource: this.cameraBlock.buffer },
-        { binding: 1, resource: this.modelBlock.buffer },
-        { binding: 2, resource: this.materialBlock.buffer },
+        ...this.baseBindGroupEntries(),
         { binding: 3, resource: this._texture.view() },
         { binding: 4, resource: this._sampler },
       ],
