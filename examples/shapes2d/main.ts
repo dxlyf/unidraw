@@ -29,10 +29,12 @@ bootDemo(
       const device = ctx.device;
       const c2d = new Canvas2D(device);
       let t = 0;
+      // ?freeze：冻结动画，用于区分“动画问题”还是“渲染/驱动问题”
+      const freeze = new URLSearchParams(location.search).has("freeze");
 
       return {
         frame(pass, ctx2) {
-          t += ctx2.dt;
+          if (!freeze) t += ctx2.dt;
           const w = Math.max(2, ctx2.width);
           const h = Math.max(2, ctx2.height);
           const s = Math.min(w, h);
@@ -234,19 +236,20 @@ bootDemo(
           }
 
           // 坐标轴/网格背景（轻）
+          // 1px 线要落在像素中心 (+0.5)，否则跨像素边界半覆盖 → 真实 GPU 上会发虚/闪
           c2d.strokeStyle = "#ffffff";
           c2d.globalAlpha = 0.05;
           c2d.lineWidth = 1;
           for (let gx = 0; gx < w; gx += s / 8) {
             c2d.beginPath();
-            c2d.moveTo(gx, 0);
-            c2d.lineTo(gx, h);
+            c2d.moveTo(gx + 0.5, 0);
+            c2d.lineTo(gx + 0.5, h);
             c2d.stroke();
           }
           for (let gy = 0; gy < h; gy += s / 8) {
             c2d.beginPath();
-            c2d.moveTo(0, gy);
-            c2d.lineTo(w, gy);
+            c2d.moveTo(0, gy + 0.5);
+            c2d.lineTo(w, gy + 0.5);
             c2d.stroke();
           }
           c2d.globalAlpha = 1;

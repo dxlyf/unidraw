@@ -152,6 +152,12 @@ export async function bootDemo(hooks: DemoHooks, options: DemoOptions = {}): Pro
   // 自动化探针钩子（无副作用）
   let probeFrames = 0;
   (globalThis as Record<string, unknown>).__unidraw = {
+    get renderer() {
+      return renderer;
+    },
+    get canvas() {
+      return canvas;
+    },
     get status() {
       return {
         backend: renderer.device.kind,

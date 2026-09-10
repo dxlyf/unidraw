@@ -349,6 +349,8 @@ export class Canvas2D {
     this.textI.length = 0;
     this.ops.length = 0;
     this.stack.length = 0;
+    // 裁剪是“每帧重新建立”的状态：避免上一帧异常/未 restore 时把后续整帧都裁掉
+    this.state.clip = null;
     this.path.begin();
     return this;
   }

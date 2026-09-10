@@ -642,6 +642,8 @@ export class WebGL2Device extends Device {
     let indexBuffer: { buffer: GLBuffer; format: IndexFormat; offset: number } | null = null;
     let targetWidth = 0;
     let targetHeight = 0;
+    /** 当前 pass 的附件高度（scissor/viewport 的 Y 翻转用） */
+    let passHeight = 0;
 
     const resetPass = () => {
       currentPipeline = null;
@@ -675,6 +677,7 @@ export class WebGL2Device extends Device {
             targetWidth = colorTex?.width ?? 0;
             targetHeight = colorTex?.height ?? 0;
           }
+          passHeight = targetHeight;
 
           // 清屏不受 scissor 影响
           if (scissorWas) gl.disable(gl.SCISSOR_TEST);
@@ -737,14 +740,19 @@ export class WebGL2Device extends Device {
           indexBuffer = op.buffer ? { buffer: op.buffer as GLBuffer, format: op.format, offset: op.offset } : null;
           break;
         }
-        case "setViewport":
-          gl.viewport(op.x, op.y, op.width, op.height);
+        case "setViewport": {
+          // 统一 API/WebGPU 约定：左上原点；GL 原点在左下 → 翻转 Y
+          const vpY = passHeight - (op.y + op.height);
+          gl.viewport(op.x, vpY, op.width, op.height);
           break;
-        case "setScissorRect":
+        }
+        case "setScissorRect": {
           gl.enable(gl.SCISSOR_TEST);
           this._scissorEnabled = true;
-          gl.scissor(op.x, op.y, op.width, op.height);
+          const scY = passHeight - (op.y + op.height);
+          gl.scissor(op.x, scY, op.width, op.height);
           break;
+        }
         case "draw":
         case "drawIndexed": {
           assert(inPass && currentPipeline, "draw 前必须 setPipeline");
