@@ -10,6 +10,15 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url)) + "/..";
 
+/**
+ * 内部验证页（`examples/_verify-*`）：不放进示例列表，但可以用
+ * `npm run build:verify` 打包，配合 tools/browser-probe.mjs 做无头回归。
+ */
+const verifyPages = [
+  { name: "_verify-shared", title: "验证 · 共享材质逐物体矩阵（动态偏移 UBO）" },
+  { name: "_verify-sphere", title: "验证 · 极点无洞 + 离屏深度清除" },
+];
+
 const demos = [
   { name: "triangle", title: "三角形 · 最小示例" },
   { name: "shapes", title: "形状 · 多几何体/深度/轨道相机" },
@@ -25,7 +34,10 @@ const demos = [
   { name: "perf-triangles", title: "性能 · 三角形吞吐" },
 ];
 
-for (const demo of demos) {
+const onlyVerify = process.argv.includes("--verify");
+const list = onlyVerify ? verifyPages : demos;
+
+for (const demo of list) {
   const outdir = join(root, "dist-examples", demo.name);
   mkdirSync(outdir, { recursive: true });
   await build({
@@ -40,6 +52,11 @@ for (const demo of demos) {
   });
   copyFileSync(join(root, "examples", demo.name, "index.html"), join(outdir, "index.html"));
   console.log(`✔ ${demo.name}`);
+}
+
+if (onlyVerify) {
+  console.log("✔ 验证页打包完成（未改动示例首页）");
+  process.exit(0);
 }
 
 // 首页

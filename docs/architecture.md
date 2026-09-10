@@ -132,6 +132,23 @@ binding 编号直接对应 WGSL `@group(g) @binding(b)`。
   首次创建后每帧复用，避免重复 `vertexAttribPointer`。
 - 实例化通过 `stepMode: "instance"` + 独立 slot 的缓冲 + `drawIndexed(count, N)`。
 
+### 5.1 内置几何的拓扑保证
+
+闭合几何（box / sphere / cylinder / cone / torus / capsule）保证：
+
+- **没有边界边**（每条边恰好被 2 个三角形共用）→ 任何角度都不应看到“洞”；
+- **没有零面积三角形**（退化三角形既浪费 draw 又说明生成逻辑有问题）；
+- **没有非流形边**（被 >2 个三角形共用的边 → 穿面/自交）；
+- 有符号体积（散度定理）与解析值一致 → 同时校验**绕序朝外**。
+
+极点（球/胶囊的南北极、圆锥顶点）是最容易出错的地方：极点整行顶点位置重合，
+若照搬中间环带的四边形，极点侧会出现两个重合顶点 → 退化三角形 →
+实际上没有覆盖极点区域。内置生成器改用「极点 + 相邻环两点」的扇形三角形
+（`sphere.ts` 与 `lathe.ts` / `cylinder.ts` 都遵循这一约定）。
+
+这些性质由 `src/__tests__/primitives.test.ts` 的 `topology()` 断言守住 ——
+「球体上下极点有洞」正是被它复现并修复的。新增几何体请一并补上该断言。
+
 ## 6. 深度测试跨后端
 
 - WebGL2：canvas 上下文以 `depth:true` 创建，`view: null` 深度附件落在默认帧缓冲。
@@ -139,6 +156,11 @@ binding 编号直接对应 WGSL `@group(g) @binding(b)`。
   格式 `depth24plus`）。
 - 离屏渲染：传入显式深度纹理（`device.createTexture({format:"depth24plus",
   usage:RENDER_ATTACHMENT})`）。
+- **`depthLoadOp: "clear"` 对「显式深度纹理」同样必须生效**：WebGL2 早期实现只清
+  canvas 默认深度，显式深度纹理会残留上一次 pass 的深度 → 后面的物体被“幽灵深度”
+  挡住（离屏渲染表现为物体缺失；ID 拾取表现为拾取到错误对象）。
+  现在两端都严格按 `loadOp` 处理（`gl.clear(DEPTH_BUFFER_BIT)` 作用于当前绑定的 FBO）。
+  回归页：`examples/_verify-sphere`（`npm run build:verify` 打包后无头跑）。
 
 ### 6.1 投影矩阵使用 ZO 约定（NDC z ∈ [0,1]）
 

@@ -21,6 +21,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json",
     "build:examples": "node tools/build-examples.mjs",
+    "build:verify": "node tools/build-examples.mjs --verify",
     "build:all": "npm run build && npm run build:examples",
     "test": "npm run build && node --test \"dist/__tests__/*.test.js\"",
     "serve": "node tools/serve.mjs"

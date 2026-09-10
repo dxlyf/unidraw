@@ -52,6 +52,116 @@ function outsideRadius(data: GeometryData, radius: number, tol = 1e-4): boolean 
   return false;
 }
 
+/**
+ * 拓扑统计：按「位置」聚合（极点/接缝常有重复顶点，但位置相同）。
+ * - `boundaryEdges`：只被 1 个三角形使用的边 → 洞/开放边界；
+ * - `degenerate`：零面积三角形；
+ * - `nonManifold`：被 > 2 个三角形共用的边（穿面）。
+ */
+function topology(data: GeometryData): { boundaryEdges: number; degenerate: number; nonManifold: number; triangles: number } {
+  const pos = data.positions;
+  const idx = data.indices;
+  const triangles = idx ? idx.length / 3 : pos.length / 9;
+  const q = (v: number): string => {
+    const r = Math.round(v * 1e5) / 1e5;
+    return (r === 0 ? 0 : r).toFixed(5);
+  };
+  const key = (i: number): string => `${q(pos[i * 3]!)},${q(pos[i * 3 + 1]!)},${q(pos[i * 3 + 2]!)}`;
+  const edges = new Map<string, number>();
+  let degenerate = 0;
+  for (let f = 0; f < triangles; f++) {
+    const i0 = idx ? idx[f * 3]! : f * 3;
+    const i1 = idx ? idx[f * 3 + 1]! : f * 3 + 1;
+    const i2 = idx ? idx[f * 3 + 2]! : f * 3 + 2;
+    const p0 = key(i0);
+    const p1 = key(i1);
+    const p2 = key(i2);
+    if (p0 === p1 || p1 === p2 || p0 === p2) {
+      degenerate++;
+      continue;
+    }
+    for (const [a, b] of [
+      [p0, p1],
+      [p1, p2],
+      [p2, p0],
+    ]) {
+      const k = (a! < b! ? `${a}|${b}` : `${b}|${a}`) as string;
+      edges.set(k, (edges.get(k) ?? 0) + 1);
+    }
+  }
+  let boundaryEdges = 0;
+  let nonManifold = 0;
+  for (const count of edges.values()) {
+    if (count === 1) boundaryEdges++;
+    else if (count > 2) nonManifold++;
+  }
+  return { boundaryEdges, degenerate, nonManifold, triangles };
+}
+
+test("内置闭合几何：无洞（无边界边）、无零面积三角形、无非流形边", () => {
+  // 闭合体：任意视角都不应看到「洞」；这条断言正是球体上下极点缺盖的回归守卫
+  const closed: [string, GeometryData][] = [
+    ["box()", box()],
+    ["box(2,3,4)", box(2, 3, 4)],
+    ["sphere(1,24,12)", sphere(1, 24, 12)],
+    ["sphere(0.5,8,6)", sphere(0.5, 8, 6)],
+    ["sphere(1,7,5)", sphere(1, 7, 5)],
+    ["cylinder(0.5,0.5,1,24)", cylinder(0.5, 0.5, 1, 24)],
+    ["cylinder(0.5,0.2,1,16)", cylinder(0.5, 0.2, 1, 16)],
+    ["cone(0.5,1,24)", cone(0.5, 1, 24)],
+    ["torus(1,0.25,24,12)", torus(1, 0.25, 24, 12)],
+    ["capsule(0.4,1,24,8)", capsule(0.4, 1, 24, 8)],
+  ];
+  for (const [name, data] of closed) {
+    const t = topology(data);
+    assert.equal(t.boundaryEdges, 0, `${name} 不应有边界边（有洞/未闭合）：${t.boundaryEdges}`);
+    assert.equal(t.degenerate, 0, `${name} 不应有零面积三角形：${t.degenerate}`);
+    assert.equal(t.nonManifold, 0, `${name} 不应有非流形边：${t.nonManifold}`);
+  }
+  // 按设计「开放」的几何：它们本来就有边界边（不是 bug）
+  assert.ok(topology(plane(1, 1)).boundaryEdges > 0, "plane 是开放面");
+  assert.ok(topology(triangle()).boundaryEdges > 0, "triangle 是开放面");
+});
+
+test("球体极点：极点顶点落在轴上，且极点扇有覆盖（不会看到洞）", () => {
+  const s = sphere(2, 16, 8);
+  const pos = s.positions;
+  // 极点行（r=0 与 r=hs）的所有顶点必须是精确的 (0, ±radius, 0)
+  for (let col = 0; col <= 16; col++) {
+    const top = col * 3;
+    assert.ok(Math.abs(pos[top]!) < 1e-9 && Math.abs(pos[top + 2]!) < 1e-9, "北极点 x/z 必须为 0");
+    assert.ok(Math.abs(pos[top + 1]! - 2) < 1e-9, "北极点 y = radius");
+    const bottom = (8 * 17 + col) * 3;
+    assert.ok(Math.abs(pos[bottom]!) < 1e-9 && Math.abs(pos[bottom + 2]!) < 1e-9, "南极点 x/z 必须为 0");
+    assert.ok(Math.abs(pos[bottom + 1]! + 2) < 1e-9, "南极点 y = -radius");
+  }
+  // 极点附近的三角形面积必须大于 0 且法线朝外（+Y / -Y 分量占优）
+  const idx = s.indices!;
+  let topArea = 0;
+  let bottomArea = 0;
+  for (let f = 0; f < idx.length / 3; f++) {
+    const i0 = idx[f * 3]! * 3;
+    const i1 = idx[f * 3 + 1]! * 3;
+    const i2 = idx[f * 3 + 2]! * 3;
+    const ys = [pos[i0 + 1]!, pos[i1 + 1]!, pos[i2 + 1]!];
+    const centroidY = (ys[0]! + ys[1]! + ys[2]!) / 3;
+    const abx = pos[i1]! - pos[i0]!;
+    const aby = pos[i1 + 1]! - pos[i0 + 1]!;
+    const abz = pos[i1 + 2]! - pos[i0 + 2]!;
+    const acx = pos[i2]! - pos[i0]!;
+    const acy = pos[i2 + 1]! - pos[i0 + 1]!;
+    const acz = pos[i2 + 2]! - pos[i0 + 2]!;
+    const area = 0.5 * Math.hypot(aby * acz - abz * acy, abz * acx - abx * acz, abx * acy - aby * acx);
+    if (centroidY > 1.4) topArea += area;
+    if (centroidY < -1.4) bottomArea += area;
+  }
+  // 极点帽面积 ≈ 球冠面积 2πr h（h = r - r·cos(π/hs)），误差放宽到 20%
+  const hs = 8;
+  const capArea = 2 * Math.PI * 2 * (2 - 2 * Math.cos(Math.PI / hs));
+  assert.ok(topArea > capArea * 0.8, `北极帽应有面积，实际 ${topArea.toFixed(4)} vs 期望 ${capArea.toFixed(4)}`);
+  assert.ok(bottomArea > capArea * 0.8, `南极帽应有面积，实际 ${bottomArea.toFixed(4)} vs 期望 ${capArea.toFixed(4)}`);
+});
+
 test("box：24 顶点 / 36 索引 / 包围盒 ±0.5", () => {
   const b = box();
   assert.equal(b.positions.length, 24 * 3);

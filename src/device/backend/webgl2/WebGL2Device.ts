@@ -235,9 +235,12 @@ export class WebGL2Device extends Device {
             gl.clearColor(c?.r ?? 0, c?.g ?? 0, c?.b ?? 0, c?.a ?? 1);
             gl.clear(gl.COLOR_BUFFER_BIT);
           }
-          const clearDepth = depthAtt?.view === null && depthAtt.depthLoadOp === "clear";
+          const clearDepth = depthAtt != null && depthAtt.depthLoadOp === "clear";
           if (clearDepth) {
-            gl.clearDepth(depthAtt?.depthClearValue ?? 1);
+            // 注意：无论深度附件是 canvas 默认深度还是**显式深度纹理**，都必须清 ——
+            // 显式纹理上一次 pass 的深度会残留，导致本次 pass 的物体被“幽灵深度”挡住
+            // （离屏渲染/ID 拾取在 WebGL2 上表现为物体缺失或拾取到错误对象）。
+            gl.clearDepth(depthAtt.depthClearValue ?? 1);
             gl.clear(gl.DEPTH_BUFFER_BIT);
           }
           if (scissorWas) {

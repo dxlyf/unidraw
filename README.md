@@ -16,7 +16,7 @@
 | 三种后端 | **WebGL2**（完整实现）、**WebGPU**（完整实现）、**Mock**（无头 CPU 后端，Node 单测用） |
 | 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包；支持**动态偏移环形 UBO**（共享材质逐物体矩阵，一次绘制换一个槽） |
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
-| 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule** |
+| 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule**；闭合几何保证**无边界边（没有洞）/无零面积三角形/无非流形边**，体积与解析值一致（单测守护） |
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
 | 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
 | 图形拾取 | `Raycaster`（CPU 包围球→三角形精确命中，按距离排序）+ `ColorPicker`（GPU 离屏 ID pass + 像素回读，逐像素精确） |
@@ -24,7 +24,7 @@
 | 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / App·插件（`node --test`，85 个用例） |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / App·插件（`node --test`，87 个用例） |
 | 示例 | 12 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**App+插件**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
@@ -36,9 +36,10 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（85 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（87 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
+npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere）到 dist-examples/
 npm run serve          # 本地静态服务 → http://localhost:8080/
 ```
 

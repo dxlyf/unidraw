@@ -52,13 +52,22 @@ export function cylinder(radiusTop = 0.5, radiusBottom = 0.5, height = 1, radial
     }
     ringOf.push(ring);
   }
+  // 侧面：半径 ≈ 0 的行是极点（圆锥顶点），改用扇形三角形，避免退化四边形
+  const POLE_EPS = 1e-6;
+  const bottomIsPole = radiusBottom <= POLE_EPS;
+  const topIsPole = radiusTop <= POLE_EPS;
   for (let row = 0; row < hs; row++) {
+    const thisIsPole = bottomIsPole && row === 0;
+    const nextIsPole = topIsPole && row === hs - 1;
+    if (thisIsPole && nextIsPole) continue;
     for (let col = 0; col < ws; col++) {
       const a = ringOf[row]![col]!;
       const b = ringOf[row]![col + 1]!;
       const c = ringOf[row + 1]![col]!;
       const d = ringOf[row + 1]![col + 1]!;
-      sideIdx.push(a, b, c, b, d, c);
+      if (thisIsPole) sideIdx.push(b, d, c);
+      else if (nextIsPole) sideIdx.push(a, b, c);
+      else sideIdx.push(a, b, c, b, d, c);
     }
   }
   positions.push(...sidePos);

@@ -41,7 +41,13 @@ export function ensureOutwardWinding(data: GeometryData): void {
 }
 
 
-/** 相邻环带网格（供旋转体/管状体复用） */
+/**
+ * 相邻环带网格（供旋转体/管状体复用）。
+ *
+ * 极点处理：某个环的半径 ≈ 0 时（球/胶囊/圆锥的顶点），该环所有顶点重合于极点，
+ * 相邻四边形会退化成零面积三角形，且极点附近实际上没有面 —— 这里改为
+ * 「极点 + 相邻环两点」的扇形三角形（与 sphere 的极点处理一致）。
+ */
 export function lathe(
   rows: { y: number; r: number; ny: number }[],
   ws: number,
@@ -64,13 +70,19 @@ export function lathe(
       rings[ri]!.push(positions.length / 3 - 1);
     }
   });
+  const POLE_EPS = 1e-6;
   for (let ri = 0; ri < rows.length - 1; ri++) {
+    const lowerIsPole = rows[ri]!.r <= POLE_EPS;
+    const upperIsPole = rows[ri + 1]!.r <= POLE_EPS;
+    if (lowerIsPole && upperIsPole) continue;
     for (let col = 0; col < ws; col++) {
       const a = rings[ri]![col]!;
       const b = rings[ri]![col + 1]!;
       const c = rings[ri + 1]![col]!;
       const d = rings[ri + 1]![col + 1]!;
-      indices.push(a, b, d, a, d, c);
+      if (lowerIsPole) indices.push(a, d, c);
+      else if (upperIsPole) indices.push(a, b, c);
+      else indices.push(a, b, d, a, d, c);
     }
   }
 }

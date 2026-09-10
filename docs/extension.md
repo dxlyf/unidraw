@@ -37,7 +37,9 @@ const geo = Geometry.create(device, data);
 自定义 `VertexStateDescriptor`（参考 instancing 示例）。
 
 > 新几何体请补一个「体积/包围盒/法线单位化」单测：`primitives.test.ts` 里的
-> `signedVolume()` 能同时抓住「面没放对位置」和「绕序朝内」两类错误。
+> `signedVolume()` 能同时抓住「面没放对位置」和「绕序朝内」两类错误；
+> `topology()` 则断言「无边界边（没有洞）/无零面积三角形/无非流形边」——
+> 极点（球、圆锥、胶囊顶点）最容易漏盖，务必用扇形三角形而不是退化的四边形。
 
 ## 3. 新增一个插件 / 应用逻辑
 
