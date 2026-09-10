@@ -50,7 +50,8 @@ export function targetFormatOf(device: Device, opts: MaterialOptions): TextureFo
 }
 
 /**
- * 标准 group 布局：0=相机 UBO、1=模型 UBO（动态偏移，逐物体换槽）、2=材质 UBO。
+ * 标准 group 布局：0=相机 UBO、1=模型 UBO（动态偏移，逐物体换槽）、2=材质 UBO、
+ * 3=灯光 UBO（`LightsBlock`，未使用灯光的材质可忽略该 binding）。
  */
 export function defaultGroupEntries(): {
   binding: number;
@@ -63,5 +64,6 @@ export function defaultGroupEntries(): {
     { binding: 0, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "CameraBlock" },
     { binding: 1, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "ModelBlock", hasDynamicOffset: true },
     { binding: 2, type: "uniform-buffer", visibility: VS_FRAGMENT_VISIBILITY, name: "MaterialBlock" },
+    { binding: 3, type: "uniform-buffer", visibility: 2 /* FRAGMENT */, name: "LightsBlock" },
   ];
 }

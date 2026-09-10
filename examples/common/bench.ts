@@ -33,8 +33,8 @@ export interface BenchContext {
 /** 一个渲染场景：draw 里画完本帧内容；status() 返回当前档位统计。 */
 export interface BenchScene {
   draw(pass: RenderPassEncoder, timeSec: number, ctx: BenchContext): void;
-  /** 每帧追加显示的统计文本（如实例数/三角形数），可空字符串 */
-  status?(): string;
+  /** 每帧追加显示的统计文本（如实例数/三角形数）；`avgMs` 为当前测量窗口的平均帧耗时 */
+  status?(avgMs: number): string;
 }
 
 export interface BenchPreset {
@@ -47,8 +47,13 @@ export interface BenchOptions {
   presets: BenchPreset[];
   /** 固定渲染分辨率系数（默认 1：忽略 devicePixelRatio，便于横评） */
   pixelScale?: number;
-  /** 每档停留毫秒（含热身；默认 3000） */
+  /** 每档停留毫秒（仅自动循环时有效；默认 3000） */
   dwellMs?: number;
+  /**
+   * 是否自动循环档位（默认 **false**：停在当前档位，用户点击档位或用 ←/→ 切换）。
+   * URL 参数 `?cycle=1` 可临时打开自动循环。
+   */
+  autoCycle?: boolean;
 }
 
 const RING = 90; // 测量窗口帧数
@@ -125,11 +130,14 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
     <div id="rows"></div>
     <div class="big">帧耗时 <span class="v" id="big"></span></div>
     <div class="status" id="status"></div>
-    <div class="hint">自动循环档位中 · 点击档位手动停留 · 空格：暂停/继续</div>`;
+    <div class="hint" id="hint"></div>`;
   document.body.appendChild(panel);
   const rowsEl = panel.querySelector("#rows")!;
   const bigEl = panel.querySelector("#big")!;
   const statusEl = panel.querySelector("#status")!;
+  const hintEl = panel.querySelector("#hint")!;
+  hintEl.textContent =
+    "←/→ 或点击切换档位（默认不自动循环）· 空格：自动循环 · R：重测当前档位 · 拖拽旋转 / 滚轮缩放";
 
   window.addEventListener("error", (e) => (errEl.textContent = `[error] ${e.message}`));
   window.addEventListener("unhandledrejection", (e) => (errEl.textContent = `[promise] ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
@@ -167,7 +175,17 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   let ring: number[] = [];
   let warmFrames = 0;
   let dwellStart = performance.now();
-  let auto = true;
+  const autoFromUrl = (() => {
+    try {
+      const v = new URLSearchParams(location.search).get("cycle");
+      if (v === "1" || v === "true") return true;
+      if (v === "0" || v === "false") return false;
+    } catch {
+      /* ignore */
+    }
+    return null;
+  })();
+  let auto = autoFromUrl ?? options.autoCycle ?? false;
   let idx = 0;
   let scene: BenchScene;
 
@@ -191,12 +209,31 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   }
 
   function activate(index: number): void {
-    idx = index;
-    scene = loadScene(index);
+    idx = Math.max(0, Math.min(options.presets.length - 1, index));
+    scene = loadScene(idx);
     refreshRows();
   }
 
-  scene = loadScene(0);
+  /** URL 参数 `?tier=N`（0 起）或 `?draws=6000`（按档位名匹配数字）指定初始档位 */
+  const initialIndex = (() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      const tier = params.get("tier");
+      if (tier !== null && Number.isFinite(Number(tier))) return Number(tier);
+      const draws = params.get("draws");
+      if (draws !== null) {
+        const want = Number(draws.replace(/[^0-9]/g, ""));
+        const found = options.presets.findIndex((p) => Number(p.name.replace(/[^0-9]/g, "")) === want);
+        if (found >= 0) return found;
+      }
+    } catch {
+      /* ignore */
+    }
+    return 0;
+  })();
+
+  scene = loadScene(initialIndex);
+  idx = initialIndex;
 
   // 档位按钮
   const buttons: HTMLButtonElement[] = [];
@@ -249,13 +286,14 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
 
     // 结果展示
     const s = frameStats();
+    let avgMs = 0;
     if (s.length > 0) {
-      const avgMs = s.reduce((a, b) => a + b, 0) / s.length;
+      avgMs = s.reduce((a, b) => a + b, 0) / s.length;
       bigEl.textContent = `${avgMs.toFixed(2)} ms · ${(1000 / avgMs).toFixed(0)} fps`;
       const rEl = document.querySelector(`#r${idx}`)!;
       rEl.textContent = `${avgMs.toFixed(1)} ms`;
     }
-    statusEl.textContent = scene.status ? scene.status() : "";
+    statusEl.textContent = scene.status ? scene.status(avgMs) : "";
 
     // 档位切换
     if (auto && now - dwellStart >= dwellMs) {
@@ -273,6 +311,17 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
       e.preventDefault();
       auto = !auto;
       if (auto) dwellStart = performance.now();
+      hintEl.textContent = auto
+        ? "自动循环档位中 · 点击档位或 ←/→ 手动停留 · 空格：暂停循环"
+        : "已固定在当前档位 · ←/→ 或点击切换档位 · 空格：恢复自动循环";
+    } else if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
+      e.preventDefault();
+      auto = false;
+      const dir = e.code === "ArrowRight" ? 1 : -1;
+      activate((idx + dir + options.presets.length) % options.presets.length);
+    } else if (e.code === "KeyR") {
+      // 重测当前档位（清空测量窗口重新热身）
+      activate(idx);
     }
   });
 

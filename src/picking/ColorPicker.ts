@@ -218,6 +218,15 @@ export class ColorPicker {
     return this.decode(ndc, pixel, { r: data[0]!, g: data[1]!, b: data[2]!, a: data[3]! });
   }
 
+  /**
+   * 回读整个 ID 目标（调试用）：返回左上原点、紧凑 RGBA。
+   * 配合 `idMap` 可以排查「ID pass 是否为空 / 编号是否对得上」这类问题。
+   */
+  async readTargetPixels(): Promise<Uint8Array> {
+    assert(this._color, "ColorPicker 已销毁");
+    return this.device.readTexturePixels(this._color);
+  }
+
   /** NDC（-1..1，上为正）→ ID 目标像素（左上原点）。 */
   ndcToPixel(ndc: NdcPoint): { x: number; y: number } {
     const x = Math.min(this._width - 1, Math.max(0, Math.floor((ndc.x * 0.5 + 0.5) * this._width)));

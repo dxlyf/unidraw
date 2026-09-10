@@ -11,6 +11,7 @@ import { assert } from "../util/assert.js";
 import type { Geometry } from "./Geometry.js";
 import { Mesh } from "./Mesh.js";
 import { CAMERA_FIELDS, MATERIAL_FIELDS, MODEL_FIELDS, STANDARD_VERTEX_STATE, defaultBlendState, defaultGroupEntries, depthFormatOf, targetFormatOf } from "./materialCommon.js";
+import { LIGHTS_FIELDS, LightsState } from "./lights/LightsState.js";
 
 const EMPTY_OFFSETS: readonly number[] = [];
 
@@ -48,11 +49,18 @@ export abstract class BaseMaterial {
   protected readonly cameraBlock: UniformBlock;
   protected modelBlock: UniformBlock;
   protected readonly materialBlock: UniformBlock;
+  /** 灯光 UBO（binding 3）：由 `beginFrame(vp, eye, lights)` 写入 */
+  protected readonly lightsBlock: UniformBlock;
   /** 由子类在所有资源就绪后通过 assembleBindGroup() 建立 */
   protected bindGroup!: BindGroup;
   private _modelSlotCursor = 0;
   private _modelSlotCount: number;
   private _seenSubmitCount: number;
+  private _unhookFlush: (() => void) | null = null;
+  /** 未显式传入灯光时使用的默认光（复用缓冲） */
+  private readonly _lightsState: LightsState;
+  /** 所有需要「提交前合批上传」的块（含扩容替换下来的旧块） */
+  private readonly _flushBlocks: UniformBlock[] = [];
 
   protected constructor(device: Device, program: Program, opts: MaterialOptions, extraLayoutEntries: BindGroupLayoutEntryDescriptor[] = []) {
     this.device = device;
@@ -82,18 +90,44 @@ export abstract class BaseMaterial {
       slots: this._modelSlotCount,
     });
     this.materialBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-material` : "material", fields: MATERIAL_FIELDS });
+    this.lightsBlock = new UniformBlock(device, { label: opts.label ? `${opts.label}-lights` : "lights", fields: LIGHTS_FIELDS });
+    this._lightsState = new LightsState().fillDefault();
     this._seenSubmitCount = device.submitCount;
+
+    // 逐 draw 写入的块只进 CPU 暂存，提交前由设备钩子一次性上传。
+    // 注意：必须把**所有创建过的**环形块都登记进来 —— 扩容时旧块仍被此前的 draw 引用，
+    // 漏掉它们会导致早期物体的模型矩阵永远不上传（ID pass 里物体直接消失/塌到原点）。
+    this._flushBlocks.push(this.cameraBlock, this.modelBlock, this.materialBlock, this.lightsBlock);
+    this._unhookFlush = device.onBeforeSubmit(() => {
+      for (let i = 0; i < this._flushBlocks.length; i++) this._flushBlocks[i]!.flushPending();
+    });
+  }
+
+  /**
+   * 子类注册「需要随提交前一起上传」的额外 UBO 块（例如 ID 材质的 IdBlock）。
+   *
+   * `flushSlot()` 是延迟上传（提交前合批），凡是逐 draw 写入的块都必须登记，
+   * 否则数据永远不会到达 GPU（表现为该块内容恒为 0）。
+   */
+  protected registerFlushBlock(block: UniformBlock): void {
+    this._flushBlocks.push(block);
+  }
+
+  /** 所有需要提交前上传的 UBO 块（含扩容替换下来的旧块；调试用） */
+  get flushBlocks(): readonly UniformBlock[] {
+    return this._flushBlocks;
   }
 
   /** 由子类提供 group 资源（含额外 texture/sampler）。 */
   protected abstract createBindGroup(): BindGroup;
 
-  /** 标准 bind group 条目：0=相机、1=模型（动态偏移）、2=材质。 */
+  /** 标准 bind group 条目：0=相机、1=模型（动态偏移）、2=材质、3=灯光。 */
   protected baseBindGroupEntries(): BindGroupEntryDescriptor[] {
     return [
       { binding: 0, resource: this.cameraBlock.buffer },
       { binding: 1, resource: this.modelBlock.buffer, offset: 0, size: this.modelBlock.stride },
       { binding: 2, resource: this.materialBlock.buffer },
+      { binding: 3, resource: this.lightsBlock.buffer },
     ];
   }
 
@@ -109,11 +143,20 @@ export abstract class BaseMaterial {
     return this.layout;
   }
 
-  /** 每帧开始时上传相机（viewProj/cameraPos）并重置模型矩阵环形槽。 */
-  beginFrame(viewProjection: Mat4, cameraPos?: Vec3): void {
+  /**
+   * 每帧开始时上传相机（viewProj/cameraPos）与灯光，并重置模型矩阵环形槽。
+   *
+   * @param lights 灯光打包数据（`SceneRenderer` 自动提供）；
+   *               省略时使用默认光（环境 0.35 + 方向光 0.65），保证「不加灯也有光照」。
+   */
+  beginFrame(viewProjection: Mat4, cameraPos?: Vec3, lights?: LightsState): void {
     this.cameraBlock.setMat4("u_viewProj", viewProjection);
     this.cameraBlock.setVec4("u_cameraPos", cameraPos?.x ?? 0, cameraPos?.y ?? 0, cameraPos?.z ?? 0, 1);
     this.cameraBlock.flush();
+    const state = lights ?? this._lightsState.fillDefault();
+    // LightsState.data 就是本块 std140 布局的字节内容，整块一次拷入
+    this.lightsBlock.setRaw(state.data);
+    this.lightsBlock.flush();
     this._modelSlotCursor = 0;
   }
 
@@ -181,8 +224,15 @@ export abstract class BaseMaterial {
       slots,
     });
     this._modelSlotCount = slots;
-    // 旧的 buffer/bind group 已记录在之前的命令里，保持存活直到 device 销毁
+    // 旧块仍被此前的 draw 引用：保持存活，并继续纳入「提交前上传」列表
+    this._flushBlocks.push(this.modelBlock);
     this.assembleBindGroup();
+  }
+
+  /** 释放材质占用的设备钩子（材质销毁时调用；正常情况下随 device 一起释放）。 */
+  dispose(): void {
+    this._unhookFlush?.();
+    this._unhookFlush = null;
   }
 
   get pipelineHandle(): RenderPipeline {

@@ -16,6 +16,7 @@
 | 三种后端 | **WebGL2**（完整实现）、**WebGPU**（完整实现）、**Mock**（无头 CPU 后端，Node 单测用） |
 | 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包；支持**动态偏移环形 UBO**（共享材质逐物体矩阵，一次绘制换一个槽） |
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
+| 灯光 | `AmbientLight` / `DirectionalLight`(平行光) / `PointLight` / `SpotLight`（锥角+半影），灯是场景图节点、可动画驱动；每帧自动收集打包进 `LightsBlock`（方向 4 / 点 8 / 聚 4，无灯时使用与历史等价的默认光） |
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule**；闭合几何保证**无边界边（没有洞）/无零面积三角形/无非流形边**，体积与解析值一致（单测守护） |
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
 | 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
@@ -24,8 +25,8 @@
 | 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / App·插件（`node --test`，90 个用例） |
-| 示例 | 12 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**App+插件**与 3 个**性能档位循环**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / App·插件（`node --test`，97 个用例） |
+| 示例 | 13 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**App+插件**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -36,7 +37,7 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（90 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（97 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere）到 dist-examples/
@@ -91,6 +92,32 @@ WebGL2 / WebGPU 共用一套实现：
 - 每档先预热 12 帧，再取 90 帧窗口平均，右上角逐档显示 ms / fps；
 - 点击档位可手动停留，**空格**暂停/继续自动循环；
 - 渲染分辨率固定为 CSS 像素（可 `?scale=2`），保证不同档位可比。
+
+### 性能（draw call 压力）
+
+`examples/perf-drawcalls` 压的是「每物体一次 draw」这条最难的路径（默认**不自动换档**，
+点击档位或 ←/→ 切换后停在该档，面板里显示 **µs/draw**）：
+
+| draws | WebGL2 | WebGPU |
+| --- | --- | --- |
+| 6 000 | 16.9 ms · 59 fps | 16.9 ms · 59 fps |
+| 10 000 | 25.7 ms · 39 fps | 16.9 ms · 59 fps |
+| 20 000 | 68.4 ms · 15 fps | 28.5 ms · 35 fps |
+| 40 000 | 132.7 ms · 8 fps | 51.9 ms · 19 fps |
+
+> 无头 SwiftShader（CPU 光栅化）实测值；真实 GPU 上更高，但**相对关系**（WebGPU 快于 WebGL2、
+> 每 draw 成本随规模的变化）一致。40 000 draws 属于压力档，真实项目里更推荐
+> 实例化 / 合批（见 `perf-instanced`）。
+
+框架为这条路径做的三件事：
+
+1. **动态偏移环形 UBO**：一个材质实例 + 一条管线 + 一个 bind group 画任意多物体；
+2. **提交前合批上传**：逐 draw 只写 CPU 暂存，`Device.onBeforeSubmit()` 把整帧合并成一次
+   `buffer.write`（这一步把 6 000 draws 从 24 fps 提到 59 fps，并让 WebGPU 反超 WebGL2）；
+3. **状态去重**：渲染通道编码器跳过同一 pass 内重复的 `setPipeline`/`setVertexBuffer`/
+   `setIndexBuffer`，WebGL2 后端再加 VAO 快路径（20000 draws 时 74 ms → 44 ms）。
+
+细节见 [docs/architecture.md](docs/architecture.md) §3.1 / §3.2。
 
 ### 场景图、拾取与交互
 
@@ -248,7 +275,7 @@ src/
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      12 个示例 + common/（demo 引导、bench 测量框架）
+examples/      13 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -278,6 +305,7 @@ docs/          中文文档（见下）
 - [render2d 2D 绘图模块](docs/render2d.md)
 - [场景图 / 交互 / 拾取](docs/picking.md)
 - [动画（关键帧 · Mixer · Tween）](docs/animation.md)
+- [灯光（环境光/方向光/点光/聚光）](docs/lighting.md)
 - [App 门面与插件](docs/app.md)
 - [着色器写作指南](docs/shader-guide.md)
 - [扩展指南（新后端 / 新材质 / 新示例）](docs/extension.md)

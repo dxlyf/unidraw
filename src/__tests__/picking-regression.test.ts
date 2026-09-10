@@ -43,6 +43,85 @@ function setup(): { device: MockDevice; scene: Scene; camera: Camera; meshes: Me
   return { device, scene, camera, meshes };
 }
 
+test("环形 UBO 扩容：旧块也必须纳入提交前上传（否则早期物体模型矩阵丢失）", async () => {
+  const device = createMockDevice();
+  const { IdMaterial } = await import("../picking/IdMaterial.js");
+  const { Mat4 } = await import("../math/mat4.js");
+  const material = new IdMaterial(device, { label: "ring-growth", modelRingSlots: 2, depth: false });
+  const geometry = Geometry.create(device, box(1, 1, 1));
+  const camera = new Camera();
+  camera.distance = 8;
+  camera.update();
+
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{ view: null, loadOp: "clear", storeOp: "store" }],
+    depthStencilAttachment: null,
+  });
+  material.beginFrame(camera.viewProjection, camera.getEyePosition());
+  // 画 6 个物体 → 触发 2→4→8 两次扩容
+  for (let i = 0; i < 6; i++) {
+    material.setId(i + 1);
+    material.drawGeometry(pass, geometry, Mat4.identity().translate(i * 2, 0, 0));
+  }
+  pass.end();
+  device.submit([encoder.finish()]);
+
+  const blocks = material.flushBlocks;
+  assert.ok(blocks.length >= 6, `应有初始 4 块 + 扩容新增的模型/ID 块，实际 ${blocks.length}`);
+  for (const block of blocks) {
+    assert.equal(
+      block.hasPending,
+      false,
+      `块 ${block.label ?? ""} 在 submit 后仍有待上传数据 —— 说明扩容后的旧块被漏刷`,
+    );
+  }
+  // 扩容出来的模型块必须真的写入了数据（非全 0）
+  const grown = blocks.filter((b) => /-ring\d+$/.test(b.label ?? ""));
+  assert.ok(grown.length >= 2, `应有扩容产生的模型块，实际 ${grown.length}（${blocks.map((b) => b.label).join(", ")}）`);
+  for (const block of grown) {
+    const data = (block.buffer as unknown as { data: Uint8Array }).data;
+    let nonZero = 0;
+    for (const byte of data) if (byte !== 0) nonZero++;
+    assert.ok(nonZero > 0, `扩容块 ${block.label} 应包含模型矩阵数据`);
+  }
+  material.dispose();
+  device.destroy();
+});
+
+test("延迟上传：逐 draw 写入的 UBO 必须在 submit 前落到 GPU（batching 后仍生效）", async () => {
+  const { device, scene, camera, meshes } = setup();
+  const picker = new ColorPicker(device, { label: "flush-test" });
+  picker.resize(64, 32);
+
+  // ID pass：每个物体一次 draw，ID 只写进 CPU 暂存 → 提交时必须 flush 到 buffer
+  device.clearDrawCalls();
+  picker.render(scene, camera);
+  device.submit([device.createCommandEncoder().finish()]);
+
+  const idMaterial = (picker as unknown as { _material: { _idBlock: { buffer: { data: Uint8Array } } } })._material;
+  const idBuffer = idMaterial._idBlock.buffer.data;
+  const idFloats = new Float32Array(idBuffer.buffer, idBuffer.byteOffset, idBuffer.byteLength / 4);
+  let nonZero = 0;
+  for (const b of idBuffer) if (b !== 0) nonZero++;
+  assert.ok(nonZero > 0, "ID 块必须在提交前被上传（否则颜色拾取全部 miss）");
+  // 第 1 号物体（slot 0）的 u_id = encodeId(1)/255 → (1/255, 0, 0, 1)
+  assert.ok(Math.abs(idFloats[0]! - 1 / 255) < 1e-6, `slot0 的 u_id.r 应为 1/255，实际 ${idFloats[0]}`);
+  assert.equal(idFloats[3], 1, "slot0 的 u_id.a 应为 1");
+
+  // 模型矩阵块也必须上传（否则所有物体都塌到原点）
+  const modelBlock = (picker as unknown as { _material: { modelBlock: { buffer: { data: Uint8Array } } } })._material.modelBlock;
+  const modelBytes = modelBlock.buffer.data;
+  let modelNonZero = 0;
+  for (const b of modelBytes) if (b !== 0) modelNonZero++;
+  assert.ok(modelNonZero > 0, "模型矩阵块必须上传");
+
+  // 依赖关系：把 ID 写入清掉（不 submit）时不应残留旧数据影响判断
+  void meshes;
+  picker.dispose();
+  device.destroy();
+});
+
 test("ColorPicker：pick() 每次都重绘 ID pass（不接受过期目标），pickPixel() 复用", async () => {
   const { device, scene, camera } = setup();
   const picker = new ColorPicker(device, { label: "stale-test" });

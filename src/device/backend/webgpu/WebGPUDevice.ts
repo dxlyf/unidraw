@@ -174,6 +174,7 @@ export class WebGPUDevice extends Device {
   override submit(commandBuffers: readonly CommandBuffer[]): void {
     assert(!this.destroyed, "Device 已销毁，无法 submit");
     if (commandBuffers.length === 0) return;
+    this.runBeforeSubmitHooks();
     const native = this.gpu.createCommandEncoder();
     for (const buffer of commandBuffers) {
       this.encodeOps(native, buffer.ops);
@@ -183,6 +184,7 @@ export class WebGPUDevice extends Device {
   }
 
   protected override executeOps(ops: readonly CommandOp[]): void {
+    this.runBeforeSubmitHooks();
     const native = this.gpu.createCommandEncoder();
     this.encodeOps(native, ops);
     this.gpu.queue.submit([native.finish()]);

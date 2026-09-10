@@ -13,6 +13,14 @@ export class RenderPassEncoder {
   private readonly _onEnd: () => void;
   private _boundPipeline: RenderPipeline | null = null;
   private _hasIndexBuffer = false;
+  /** 冗余设置去重：状态未变时不再产生 op（大量 draw 时能省掉 ~60% 的命令对象） */
+  private _vertexBuffers: (Buffer | null)[] = [];
+  private _vertexOffsets: number[] = [];
+  private _indexBuffer: Buffer | null = null;
+  private _indexFormat: IndexFormat | null = null;
+  private _indexOffset = 0;
+  /** 是否启用冗余去重（默认开；关掉可得到「每次调用都记录」的完整命令流） */
+  dedupe = true;
   readonly label: string | undefined;
 
   constructor(ops: CommandOp[], label: string | undefined, onEnd: () => void) {
@@ -27,6 +35,7 @@ export class RenderPassEncoder {
 
   setPipeline(pipeline: RenderPipeline): void {
     this.assertActive();
+    if (this.dedupe && this._boundPipeline === pipeline) return;
     this._ops.push({ k: "setPipeline", pipeline });
     this._boundPipeline = pipeline;
   }
@@ -44,13 +53,20 @@ export class RenderPassEncoder {
 
   setVertexBuffer(slot: number, buffer: Buffer | null, offset = 0): void {
     this.assertActive();
+    if (this.dedupe && this._vertexBuffers[slot] === buffer && this._vertexOffsets[slot] === offset) return;
+    this._vertexBuffers[slot] = buffer;
+    this._vertexOffsets[slot] = offset;
     this._ops.push({ k: "setVertexBuffer", slot, buffer, offset });
   }
 
   setIndexBuffer(buffer: Buffer | null, format: IndexFormat, offset = 0): void {
     this.assertActive();
-    this._ops.push({ k: "setIndexBuffer", buffer, format, offset });
     this._hasIndexBuffer = buffer !== null;
+    if (this.dedupe && this._indexBuffer === buffer && this._indexFormat === format && this._indexOffset === offset) return;
+    this._indexBuffer = buffer;
+    this._indexFormat = format;
+    this._indexOffset = offset;
+    this._ops.push({ k: "setIndexBuffer", buffer, format, offset });
   }
 
   draw(vertexCount: number, instanceCount = 1, firstVertex = 0, firstInstance = 0): void {

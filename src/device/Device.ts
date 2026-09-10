@@ -59,6 +59,7 @@ export abstract class Device extends ResourceBase {
   readonly canvas: HTMLCanvasElement | null;
   readonly info: DeviceInfo;
   private readonly _resources: ResourceBase[] = [];
+  private readonly _beforeSubmit = new Set<() => void>();
   private _submitCount = 0;
 
   protected constructor(kind: BackendKind, canvas: HTMLCanvasElement | null, info: DeviceInfo) {
@@ -112,6 +113,8 @@ export abstract class Device extends ResourceBase {
    */
   submit(commandBuffers: readonly CommandBuffer[]): void {
     assert(!this.destroyed, "Device 已销毁，无法 submit");
+    // 合并的 UBO 写入等必须在命令生效前落地（见 onBeforeSubmit）
+    this.runBeforeSubmitHooks();
     for (const buffer of commandBuffers) {
       this.executeOps(buffer.ops);
     }
@@ -152,9 +155,30 @@ export abstract class Device extends ResourceBase {
   /** 由后端实现：把统一命令翻译为原生调用。 */
   protected abstract executeOps(ops: readonly CommandOp[]): void;
 
+  /**
+   * 注册「提交前」回调：在 `submit()` 把命令交给 GPU **之前**执行。
+   *
+   * 用途：把一帧内累积的 UBO 写入合并成一次 `buffer.write`（逐 draw 写 64B 在
+   * WebGPU 上是 6000 次队列操作，合并后只剩几次）；回调里写 buffer 在两种后端
+   * 都保证先于本帧的 draw 生效（后端在 submit 时才翻译/编码命令）。
+   *
+   * @returns 取消注册
+   */
+  onBeforeSubmit(callback: () => void): () => void {
+    this._beforeSubmit.add(callback);
+    return () => this._beforeSubmit.delete(callback);
+  }
+
+  /** @internal 由后端在提交前调用。 */
+  protected runBeforeSubmitHooks(): void {
+    if (this._beforeSubmit.size === 0) return;
+    for (const cb of this._beforeSubmit) cb();
+  }
+
   override destroy(): void {
     if (this.destroyed) return;
     this.markDestroyed();
+    this._beforeSubmit.clear();
     for (const r of this._resources) {
       if (!r.destroyed) r.destroy();
     }

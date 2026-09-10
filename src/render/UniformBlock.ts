@@ -41,6 +41,12 @@ export class UniformBlock {
   readonly slots: number;
   private readonly _f32: Float32Array;
   private readonly _bytes: ArrayBuffer;
+  /** 环形槽的 CPU 暂存（slots × stride） */
+  private readonly _staging: ArrayBuffer;
+  private readonly _bytesF32: Float32Array;
+  private _pending = false;
+  private _pendingStart = -1;
+  private _pendingEnd = -1;
 
   constructor(device: Device, options: UniformBlockOptions) {
     this.device = device;
@@ -51,6 +57,8 @@ export class UniformBlock {
     this.stride = this.slots > 1 ? align(this.layout.size, alignment) : this.layout.size;
     this._bytes = new ArrayBuffer(this.layout.size);
     this._f32 = new Float32Array(this._bytes);
+    this._staging = new ArrayBuffer(this.stride * this.slots);
+    this._bytesF32 = new Float32Array(this._staging);
     this.buffer = device.createBuffer({
       label: options.label ? `${options.label}-ubo` : undefined,
       size: this.stride * this.slots,
@@ -147,10 +155,57 @@ export class UniformBlock {
     this.buffer.write(this._bytes);
   }
 
-  /** 把当前 CPU 数据写入指定槽（动态偏移 UBO）。 */
+  /**
+   * 用外部按同一 std140 布局打包好的浮点数据整体覆盖本块。
+   * （例如灯光：`LightsState.data` 直接倒进来，避免逐字段 setVec4）
+   */
+  setRaw(data: Float32Array): void {
+    assert(
+      data.length === this._f32.length,
+      `setRaw 数据长度不匹配：期望 ${this._f32.length} 个 float，实际 ${data.length}`,
+    );
+    this._f32.set(data);
+  }
+
+  /**
+   * 把当前 CPU 数据写入指定槽 —— **不立即上传**，只记录待写区间。
+   *
+   * 逐 draw 调用（配合 `flushPending()` 在提交前一次性上传）可以把
+   * 「每 draw 一次 64B writeBuffer」合并成「每帧一次大写入」：
+   * WebGPU 上 6000 draws 的 6000 次队列操作会降到几次，这是 draw call 压力的关键优化。
+   */
   flushSlot(slot: number): void {
     assert(slot >= 0 && slot < this.slots, `uniform 槽位 ${slot} 超出范围（slots=${this.slots}）`);
-    this.buffer.write(this._bytes, slot * this.stride);
+    const offset = slot * this.stride;
+    this._bytesF32.set(this._f32, offset / 4);
+    const end = offset + this.layout.size;
+    if (this._pendingStart < 0) {
+      this._pendingStart = offset;
+      this._pendingEnd = end;
+    } else {
+      if (offset < this._pendingStart) this._pendingStart = offset;
+      if (end > this._pendingEnd) this._pendingEnd = end;
+    }
+    this._pending = true;
+  }
+
+  /**
+   * 把累积的槽位数据一次性上传（区间为 [首个待写槽, 最后一个待写槽] 的并集）。
+   * 由 `BaseMaterial` 注册到 `Device.onBeforeSubmit()`，因此不需要业务代码关心。
+   */
+  flushPending(): void {
+    if (!this._pending) return;
+    const start = this._pendingStart;
+    const end = this._pendingEnd;
+    this._pending = false;
+    this._pendingStart = -1;
+    this._pendingEnd = -1;
+    this.buffer.write(new Uint8Array(this._staging, start, end - start), start);
+  }
+
+  /** 是否有等待上传的数据 */
+  get hasPending(): boolean {
+    return this._pending;
   }
 }
 

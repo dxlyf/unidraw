@@ -14,6 +14,8 @@ import { Frustum } from "./Frustum.js";
 import type { Node3D } from "./Node3D.js";
 import type { MaterialLike } from "./types.js";
 import { Vec3 } from "../math/vec3.js";
+import { collectLights } from "../render/lights/collectLights.js";
+import { LightsState } from "../render/lights/LightsState.js";
 
 export interface RenderStats {
   /** 场景中 Mesh 总数 */
@@ -37,6 +39,11 @@ export interface SceneRenderOptions {
   overrideMaterial?: MaterialLike | null;
   /** 过滤（返回 false 则不绘制） */
   filter?: (mesh: Mesh) => boolean;
+  /**
+   * 覆盖灯光数据（缺省从场景图收集；传 `null` 表示不使用灯光——
+   * 此时材质退化为默认光，等价于「场景里没有任何灯」）。
+   */
+  lights?: LightsState | null;
 }
 
 interface Item {
@@ -58,6 +65,8 @@ export class SceneRenderer {
   private readonly _visible: Mesh[] = [];
   private readonly _usedMaterials: MaterialLike[] = [];
   private readonly _eye = new Vec3();
+  /** 本帧灯光打包缓冲（复用） */
+  private readonly lights = new LightsState();
 
   /**
    * 收集「可见（已剔除、已排序）」的 Mesh。
@@ -138,7 +147,10 @@ export class SceneRenderer {
     const list = this._sorted;
     this.collectVisible(scene, camera, options);
 
-    // 关键：绘制前把相机喂给本次用到的每个材质（u_viewProj / u_cameraPos）。
+    // 收集场景灯光（没有灯时使用与历史版本等价的默认光）并喂给材质
+    const lights = this.collectLightsForRender(scene, options.lights);
+
+    // 关键：绘制前把相机与灯光喂给本次用到的每个材质（u_viewProj / LightsBlock）。
     // 漏掉这一步的表现是「draw 都调用了、stats 也对，但画面全空」——
     // 因为材质的 viewProj 是零矩阵，顶点全部投影到原点。
     const used = this._usedMaterials;
@@ -147,7 +159,7 @@ export class SceneRenderer {
       const material = list[i]!.material;
       if (used.indexOf(material) >= 0) continue;
       used.push(material);
-      material.beginFrame?.(camera.viewProjection, this._eye);
+      material.beginFrame?.(camera.viewProjection, this._eye, lights);
     }
 
     const stats = this.stats;
@@ -159,4 +171,24 @@ export class SceneRenderer {
       stats.triangles += g.indexCount > 0 ? g.indexCount / 3 : Math.floor(g.vertexCount / 3);
     }
   }
+
+  /**
+   * 收集灯光（`collectLights()` 的包装）：结果复用内部 `LightsState`，
+   * 供自定义 pass 也拿到同一份灯光数据。
+   */
+  collectLightsForRender(scene: Node3D, lights?: LightsState | null): LightsState {
+    if (lights) {
+      this.lights.fillFrom(lights);
+      return this.lights;
+    }
+    const result = collectLights(scene, this.lights);
+    this.lightCount = result.count;
+    this.usedDefaultLights = result.usedDefault;
+    return this.lights;
+  }
+
+  /** 本帧收集到的灯光数量（不含默认光）；供 HUD/自检使用 */
+  lightCount = 0;
+  /** 本帧是否使用了默认光（场景里没有灯） */
+  usedDefaultLights = false;
 }

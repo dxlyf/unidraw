@@ -23,7 +23,7 @@ export interface TextureMaterialOptions extends MaterialOptions {
 
 /**
  * 纹理材质：albedo 纹理 * 颜色。
- * 布局额外包含 binding 3（u_albedo）与 binding 4（u_albedoSampler）。
+ * 布局：0/1/2 标准块，3 = LightsBlock（基类），4 = u_albedo，5 = u_albedoSampler。
  */
 export class TextureMaterial extends BaseMaterial {
   private _texture: Texture;
@@ -37,8 +37,8 @@ export class TextureMaterial extends BaseMaterial {
       wgsl: { code: VERTEX_WGSL + TEXTURE_FRAGMENT_WGSL },
     });
     super(device, program, opts, [
-      { binding: 3, type: "texture", visibility: 2, name: "u_albedo" },
-      { binding: 4, type: "sampler", visibility: 2, name: "u_albedoSampler" },
+      { binding: 4, type: "texture", visibility: 2, name: "u_albedo" },
+      { binding: 5, type: "sampler", visibility: 2, name: "u_albedoSampler" },
     ]);
     const s = opts.sampler ?? {};
     this._sampler = device.createSampler({
@@ -95,8 +95,8 @@ export class TextureMaterial extends BaseMaterial {
       layout: this.layout,
       entries: [
         ...this.baseBindGroupEntries(),
-        { binding: 3, resource: this._texture.view() },
-        { binding: 4, resource: this._sampler },
+        { binding: 4, resource: this._texture.view() },
+        { binding: 5, resource: this._sampler },
       ],
     });
   }

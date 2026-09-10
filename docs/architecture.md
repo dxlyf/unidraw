@@ -103,6 +103,33 @@ device.submit([encoder.finish()]);
 带来的好处：一个材质实例 + 一条管线 + 一个 bind group 就能画任意多个物体（状态最小化），
 CPU 侧只有一次 64B 的 `writeBuffer`（`perf-drawcalls` 示例即压这条路径）。
 
+### 3.2 提交前合批的 UBO 上传
+
+逐 draw 写 64B 在 WebGPU 上等于「每帧 6000+ 次队列操作」，是 draw call 压力的主要瓶颈
+（实测 6000 draws 只有 24fps、且 **WebGPU 比 WebGL2 更慢**）。框架的做法：
+
+- `UniformBlock.flushSlot()` 只把数据写进 **CPU 暂存**并记录待上传区间；
+- `Device.onBeforeSubmit()` 钩子在 `submit()` 真正把命令交给 GPU 之前，
+  把每个材质的待上传区间**合并成一次 `buffer.write`**；
+- 两种后端都满足「钩子里的写先于本帧的 draw 生效」：WebGL2 在 submit 时才翻译命令、
+  WebGPU 的 `writeBuffer` 是队列操作且先于同批 `queue.submit` 的命令缓冲执行。
+
+实测（无头 SwiftShader，同机同档位）：
+
+| 档位 | 逐 draw 上传 | 提交前合批 |
+| --- | --- | --- |
+| 6000 draws (WebGPU) | 41.8 ms / 24 fps | 17.0 ms / **59 fps** |
+| 20000 draws (WebGPU) | 160.6 ms / 6 fps | 24.3 ms / **41 fps** |
+| 20000 draws (WebGL2) | — | 44.5 ms / 22 fps |
+
+另外两处配套优化（都体现在 `perf-drawcalls`）：
+
+- **渲染通道编码器去重**：同一 pass 内重复的 `setPipeline` / `setVertexBuffer` /
+  `setIndexBuffer` 不再产生命令（20000 draws 时省掉约 60% 的命令对象，
+  WebGL2 实测 74 ms → 44 ms）；
+- **WebGL2 的 VAO 快路径**：连续绘制同一 pipeline/缓冲时跳过 VAO key 字符串构造与 Map 查询，
+  并缓存当前绑定的 VAO（`gl.bindVertexArray` 只在变化时调用）。
+
 ## 4. BindGroup 在两种后端的等价实现
 
 ### WebGPU（原生）

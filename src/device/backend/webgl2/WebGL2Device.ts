@@ -29,6 +29,18 @@ export class WebGL2Device extends Device {
   private _textureUnitCursor = 0;
   private readonly _vaos = new Map<string, WebGLVertexArrayObject>();
   private readonly _fbos = new Map<string, WebGLFramebuffer>();
+  /** 当前绑定的 VAO（避免重复 bindVertexArray） */
+  private _boundVao: WebGLVertexArrayObject | null = null;
+  /** 上一次绘制用的 VAO 及其指纹（大量 draw 时跳过 key 字符串构造） */
+  private readonly _lastVao = {
+    vao: null as WebGLVertexArrayObject | null,
+    pipeline: null as GLRenderPipeline | null,
+    indexBuffer: null as GLBuffer | null,
+    baseVertex: 0,
+    vertexSlot0: null as GLBuffer | null,
+    vertexOffset0: 0,
+    vertexCount: -1,
+  };
   private readonly _layoutCache = new Map<string, GLBindGroupLayout>();
   private readonly _uboFree: number[] = [];
   private readonly _texFree: number[] = [];
@@ -426,15 +438,47 @@ export class WebGL2Device extends Device {
     const topology = (pipeline.descriptor.primitive?.topology ?? "triangle-list") as string;
     const mode = TOPOLOGY_GL[topology]!;
     const baseVertex = op.k === "drawIndexed" ? op.baseVertex : 0;
-    const key = this.vaoKey(pipeline, vertexBuffers, index?.buffer ?? null, baseVertex);
-    let vao = this._vaos.get(key);
-    if (!vao) {
-      vao = gl.createVertexArray();
-      if (!vao) throw new UnidrawError("createVertexArray 失败");
-      this._vaos.set(key, vao);
-      this.setupVao(pipeline, vertexBuffers, index?.buffer ?? null, baseVertex, vao);
+    // 大量 draw 时最常见的形态是「同一 pipeline + 同一批缓冲 + 同一 baseVertex 连续绘制」，
+    // 用一次性缓存跳过 VAO key 字符串构造与 Map 查询
+    const cache = this._lastVao;
+    let vao: WebGLVertexArrayObject | null;
+    const simpleCase = vertexBuffers.size <= 1; // 多顶点流时退化为 key 查表，保证正确性
+    if (
+      simpleCase &&
+      cache.vao &&
+      cache.pipeline === pipeline &&
+      cache.indexBuffer === (index?.buffer ?? null) &&
+      cache.baseVertex === baseVertex &&
+      cache.vertexSlot0 === (vertexBuffers.get(0)?.buffer ?? null) &&
+      cache.vertexOffset0 === (vertexBuffers.get(0)?.offset ?? 0) &&
+      cache.vertexCount === vertexBuffers.size
+    ) {
+      vao = cache.vao;
+    } else {
+      const key = this.vaoKey(pipeline, vertexBuffers, index?.buffer ?? null, baseVertex);
+      vao = this._vaos.get(key) ?? null;
+      if (!vao) {
+        vao = gl.createVertexArray();
+        if (!vao) throw new UnidrawError("createVertexArray 失败");
+        this._vaos.set(key, vao);
+        this.setupVao(pipeline, vertexBuffers, index?.buffer ?? null, baseVertex, vao);
+      }
+      if (simpleCase) {
+        cache.vao = vao;
+        cache.pipeline = pipeline;
+        cache.indexBuffer = index?.buffer ?? null;
+        cache.baseVertex = baseVertex;
+        cache.vertexSlot0 = vertexBuffers.get(0)?.buffer ?? null;
+        cache.vertexOffset0 = vertexBuffers.get(0)?.offset ?? 0;
+        cache.vertexCount = vertexBuffers.size;
+      } else {
+        cache.vao = null;
+      }
     }
-    gl.bindVertexArray(vao);
+    if (this._boundVao !== vao) {
+      gl.bindVertexArray(vao);
+      this._boundVao = vao;
+    }
     if (op.k === "draw") {
       gl.drawArraysInstanced(mode, op.firstVertex, op.vertexCount, op.instanceCount);
     } else {
@@ -442,7 +486,6 @@ export class WebGL2Device extends Device {
       const byteOffset = index.offset + op.firstIndex * INDEX_FORMAT_BYTES[index.format];
       gl.drawElementsInstanced(mode, op.indexCount, INDEX_TYPES[index.format], byteOffset, op.instanceCount);
     }
-    gl.bindVertexArray(null);
   }
 
   private vaoKey(
@@ -495,6 +538,7 @@ export class WebGL2Device extends Device {
     }
     if (indexBuffer) gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer.glBuffer);
     gl.bindVertexArray(null);
+    this._boundVao = null; // setupVao 结尾解绑，保持状态跟踪一致
   }
 
   private getFramebuffer(color: GLTexture | null, depth: GLTexture | null): WebGLFramebuffer {

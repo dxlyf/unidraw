@@ -43,7 +43,7 @@ export class IdMaterial extends BaseMaterial {
         wgsl: { code: ID_WGSL },
       }),
       { ...opts, label: opts.label ?? "unidraw-id-material" },
-      [{ binding: 3, type: "uniform-buffer", visibility: 1, name: "IdBlock", hasDynamicOffset: true }],
+      [{ binding: 4, type: "uniform-buffer", visibility: 1, name: "IdBlock", hasDynamicOffset: true }],
     );
     this._idSlotCount = this.modelSlotCount;
     this._idBlock = new UniformBlock(device, {
@@ -51,6 +51,8 @@ export class IdMaterial extends BaseMaterial {
       fields: ID_FIELDS,
       slots: this._idSlotCount,
     });
+    // ID 是逐 draw 写入的 → 必须注册进「提交前合批上传」，否则 GPU 上恒为 0（拾取全 miss）
+    this.registerFlushBlock(this._idBlock);
     this.assembleBindGroup();
   }
 
@@ -76,7 +78,7 @@ export class IdMaterial extends BaseMaterial {
   protected override createBindGroup(): BindGroup {
     const entries: BindGroupEntryDescriptor[] = [
       ...this.baseBindGroupEntries(),
-      { binding: 3, resource: this._idBlock.buffer, offset: 0, size: this._idBlock.stride },
+      { binding: 4, resource: this._idBlock.buffer, offset: 0, size: this._idBlock.stride },
     ];
     return this.device.createBindGroup({ label: "id-material-group", layout: this.layout, entries });
   }
@@ -93,6 +95,7 @@ export class IdMaterial extends BaseMaterial {
     const slots = Math.max(needed, this._idSlotCount * 2);
     this._idBlock = new UniformBlock(this.device, { label: `id-block-${slots}`, fields: ID_FIELDS, slots });
     this._idSlotCount = slots;
+    this.registerFlushBlock(this._idBlock);
     this.assembleBindGroup();
   }
 }
@@ -142,7 +145,7 @@ struct IdBlock {
 
 @group(0) @binding(0) var<uniform> camera : CameraBlock;
 @group(0) @binding(1) var<uniform> model : ModelBlock;
-@group(0) @binding(3) var<uniform> idBlock : IdBlock;
+@group(0) @binding(4) var<uniform> idBlock : IdBlock;
 
 struct VSOut {
   @builtin(position) clip_pos : vec4f,
