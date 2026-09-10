@@ -22,9 +22,10 @@
 | 图形拾取 | `Raycaster`（CPU 包围球→三角形精确命中，按距离排序）+ `ColorPicker`（GPU 离屏 ID pass + 像素回读，逐像素精确） |
 | 动画 | `KeyframeTrack`（数值/Vec3/颜色/**自定义绑定**）、`AnimationClip` + `AnimationMixer`/`AnimationAction`（播放/暂停/循环/**时间缩放**/淡入淡出）、`Tween`（`tweenNumber/tweenVec3/tweenColor/tweenObject` + `TweenManager`）、`Easing`（quad/cubic/sine/expo/back/elastic） |
 | 纹理回读 | `device.readTexturePixels(...)`：WebGL2 / WebGPU / Mock 三后端统一（左上原点、紧凑 RGBA） |
+| 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 + **Mock 后端全流程集成测试**（`node --test`，74 个用例） |
-| 示例 | 11 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**与 3 个**性能档位循环**示例 |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 动画 / App·插件（`node --test`，79 个用例） |
+| 示例 | 12 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**App+插件**与 3 个**性能档位循环**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
 
@@ -35,7 +36,7 @@
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（74 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（79 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run serve          # 本地静态服务 → http://localhost:8080/
@@ -160,6 +161,27 @@ tweens.update(dt);
 示例 `examples/animation` 同时演示层级动画（父节点旋转带动子树）、关键帧、Mixer 与 Tween，
 并可用键盘切换循环模式与时间缩放。详见 [docs/animation.md](docs/animation.md)。
 
+### 应用门面与插件（`src/app`）
+
+```ts
+import { App, OrbitControlsPlugin, HighlightPlugin } from "unidraw";
+
+const app = await App.create(canvas, { backend: "auto" });
+app.scene.add(mesh);
+app.mixer.play(clip, { loop: "ping-pong" });
+app.use(new OrbitControlsPlugin());
+app.use(new HighlightPlugin({ highlight: highlightMaterial, onSelect: (m) => console.log(m?.name) }));
+app.onRender((pass) => { /* 额外绘制 */ });
+app.start();                 // 或固定步长 app.step(1/60)
+console.log(app.stats);      // frames/fps/dt + objects/drawn/culled/triangles
+```
+
+`step()` 固定顺序：尺寸检测 → 插件 `update` → `mixer` → `tweens` → `beginFrame` →
+`beforeRender` → 内置 `SceneRenderer`（可关）→ `onRender` → `afterRender` → `endFrame` → stats。
+插件生命周期 `setup/update/beforeRender/afterRender/resize/dispose`，`dispose` 逆序调用。
+示例 `examples/app` 用「轨道相机 + 拾取高亮 + 自定义 HUD 插件 + 动画 + Tween」串起完整应用；
+详见 [docs/app.md](docs/app.md)。
+
 ### 一个最小例子（与后端无关）
 
 ```ts
@@ -225,7 +247,7 @@ src/
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      11 个示例 + common/（demo 引导、bench 测量框架）
+examples/      12 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -255,6 +277,7 @@ docs/          中文文档（见下）
 - [render2d 2D 绘图模块](docs/render2d.md)
 - [场景图 / 交互 / 拾取](docs/picking.md)
 - [动画（关键帧 · Mixer · Tween）](docs/animation.md)
+- [App 门面与插件](docs/app.md)
 - [着色器写作指南](docs/shader-guide.md)
 - [扩展指南（新后端 / 新材质 / 新示例）](docs/extension.md)
 
