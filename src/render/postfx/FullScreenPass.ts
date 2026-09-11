@@ -77,6 +77,14 @@ export interface FullScreenPassOptions {
    * 但纹理完整性检查仍会生效。
    */
   nearest?: boolean;
+  /**
+   * 输入纹理的采样类型（默认 `"float"`）。
+   *
+   * 读**深度纹理**时必须显式给 `"depth"`：WebGPU 的绑定布局会校验
+   * `sampleType`，声明成 Float 再绑深度纹理会直接校验失败
+   * （表现为整帧命令缓冲作废、`readPixels` 回读全是 0）。
+   */
+  textureSampleType?: "float" | "depth";
 }
 
 export class FullScreenPass implements PostEffect {
@@ -103,13 +111,19 @@ export class FullScreenPass implements PostEffect {
       glsl: { vertex: FULLSCREEN_VERTEX_GLSL, fragment: options.fragment.glsl },
       wgsl: { code: FULLSCREEN_VERTEX_WGSL + options.fragment.wgsl },
     });
-    const entries = [
-      { binding: 0, type: "uniform-buffer" as const, visibility: 2, name: "ParamsBlock" },
-      { binding: 1, type: "texture" as const, visibility: 2, name: "u_input" },
-      { binding: 2, type: "sampler" as const, visibility: 2, name: "u_inputSampler" },
+    const entries: Parameters<Device["createBindGroupLayout"]>[0]["entries"] = [
+      { binding: 0, type: "uniform-buffer", visibility: 2, name: "ParamsBlock" },
+      {
+        binding: 1,
+        type: "texture",
+        visibility: 2,
+        name: "u_input",
+        ...(options.textureSampleType === "depth" ? { sampleType: "depth" as const } : {}),
+      },
+      { binding: 2, type: "sampler", visibility: 2, name: "u_inputSampler" },
     ];
     for (let i = 0; i < this._extraCount; i++) {
-      entries.push({ binding: 3 + i, type: "texture" as const, visibility: 2, name: `u_extra${i}` });
+      entries.push({ binding: 3 + i, type: "texture", visibility: 2, name: `u_extra${i}` });
     }
     this.layout = device.createBindGroupLayout({ label: `postfx-${options.name}-layout`, entries });
     this.params = new UniformBlock(device, {

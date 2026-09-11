@@ -18,6 +18,7 @@ const verifyPages = [
   { name: "_verify-shared", title: "验证 · 共享材质逐物体矩阵（动态偏移 UBO）" },
   { name: "_verify-sphere", title: "验证 · 极点无洞 + 离屏深度清除" },
   { name: "_verify-2d-clip", title: "验证 · 2D 合批与文本缓冲（WebGL2 索引绑定）" },
+  { name: "_verify-2d-parity", title: "验证 · 与原生 Canvas2D 的逐像素对照" },
 ];
 
 const demos = [

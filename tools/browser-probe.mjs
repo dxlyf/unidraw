@@ -138,7 +138,12 @@ if (process.env.DEBUG_EVAL) {
   console.log("EVAL:", typeof value === "string" ? value : JSON.stringify(value));
 }
 console.log("CONSOLE:");
-console.log(consoleLines.slice(0, 40).join("\n") || "(none)");
+console.log(consoleLines.slice(0, Number(process.env.PROBE_CONSOLE_LINES || 40)).join("\n") || "(none)");
+// 控制台错误单独汇总：WebGPU 的校验/着色器错误只走 console.error，不会进 #err，
+// 很容易被「err 为空」误判为正常 —— 回归时必须看这一行。
+const errLines = consoleLines.filter((l) => l.startsWith("[console.error]") || l.startsWith("[exception]"));
+console.log(`CONSOLE_ERRORS: ${errLines.length}`);
+if (errLines.length) console.log(errLines.slice(0, 6).join("\n"));
 console.log("SHOT:", b64 ? `${outPng} (${(b64.length * 0.75).toFixed(0)}B)` : "failed");
 
 ws.close();

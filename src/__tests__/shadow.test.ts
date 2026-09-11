@@ -415,8 +415,8 @@ test("App：shadows 选项每帧自动渲染阴影 pass", async () => {
   app.step(1 / 60);
   assert.equal(app.shadows!.stats.maps, 1, "每帧渲染 1 张阴影贴图");
   assert.equal(app.shadows!.stats.drawn, 1, "阴影 pass 画了 1 个物体");
-  // pass 数 = 阴影 + 画布
-  assert.equal(device.passCount, 2);
+  // pass 数 = 阴影 + 画布 + 呈现（Renderer 默认 msaa: 4 → 离屏 MSAA 目标 + 呈现 pass）
+  assert.equal(device.passCount, 3);
   app.dispose();
 });
 

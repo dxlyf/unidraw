@@ -1,13 +1,17 @@
 import type { Device } from "../device/Device.js";
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { Texture } from "../device/resources.js";
-import type { BindGroup, BindGroupLayout, Buffer, RenderPipeline, Sampler } from "../device/resources.js";
+import type { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline, Sampler } from "../device/resources.js";
 import { ColorWriteMask } from "../device/descriptors.js";
 import { UniformBlock } from "../render/UniformBlock.js";
 import { Mat4 } from "../math/mat4.js";
-import { BufferUsage } from "../gpu/types.js";
+import { Color } from "../math/color.js";
+import { BufferUsage, TextureUsage } from "../gpu/types.js";
 import type { PaintStyle } from "./style.js";
 import { sampleStyle } from "./style.js";
+import { hexColor, type GradientStop } from "./color.js";
+import { LinearGradient } from "./LinearGradient.js";
+import { RadialGradient } from "./RadialGradient.js";
 import { Path2D } from "./path.js";
 import { triangulateSimplePolygon } from "./triangulate.js";
 import type { Pt2 } from "./matrix.js";
@@ -17,6 +21,27 @@ import { TextRenderer } from "./text.js";
 import type { Canvas2DOptions, DeviceRect, LineCap, LineJoin, Op, SavedState } from "./types.js";
 import { DEFAULT_FONT } from "./types.js";
 import { detectRectContour, intersectRects, lineIntersect, normalOffset, sameClip, unitDir } from "./geometry2d.js";
+
+/** 渐变 LUT 的采样数（512×1：stop 插值由浏览器的 CanvasGradient 完成，与原生一致） */
+const GRADIENT_LUT_SIZE = 512;
+/** LUT 缓存上限（超出按插入顺序淘汰最旧的） */
+const GRADIENT_LUT_CACHE = 64;
+
+/**
+ * 一次 `fill()`/`stroke()` 用到的画笔。
+ *
+ * `kind`：0 = 纯色（走顶点色）、1 = 线性渐变、2 = 径向渐变（都走 LUT 逐像素求值）。
+ * `frame` 是**用户空间**的渐变几何：线性为 `(x0,y0,x1,y1)`，径向为 `(cx,cy,r)`。
+ */
+interface ResolvedPaint {
+  kind: number;
+  frame: [number, number, number, number, number, number, number];
+  lut: Texture | null;
+  /** 顶点色（渐变时是 (1,1,1,globalAlpha)，颜色交给 LUT） */
+  vcolor: [number, number, number, number];
+}
+
+const SOLID_PAINT: ResolvedPaint = { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [1, 1, 1, 1] };
 
 export class Canvas2D {
   private device: Device;
@@ -37,12 +62,28 @@ export class Canvas2D {
   private textCap = 1 << 12;
 
   private viewBlock!: UniformBlock;
-  private flatPipeline!: RenderPipeline;
-  private texPipeline!: RenderPipeline;
-  private flatGroup!: BindGroup;
+  private flatProgram!: Program;
+  private texProgram!: Program;
   private texLayout!: BindGroupLayout;
+  /**
+   * 管线按**采样数**缓存。
+   *
+   * WebGPU 要求「管线声明的 `multisample.count` 必须与 render pass 的颜色附件一致」，
+   * 而框架现在默认把一帧渲染进 4x MSAA 离屏目标（`RendererOptions.msaa`，默认 4）——
+   * 所以 2D 也必须有 4x 版本，否则 WebGPU 直接校验失败、整层 2D 内容静默消失
+   * （WebGL2 不校验，所以只在 WebGPU 上暴露）。
+   */
+  private readonly flatPipelines = new Map<number, RenderPipeline>();
+  private readonly texPipelines = new Map<number, RenderPipeline>();
   private sampler!: Sampler;
-  private glyphGroups = new WeakMap<Texture, BindGroup>();
+  private readonly textureGroups = new WeakMap<Texture, BindGroup>();
+  private pipelineFormat: string | null = null;
+  /** 纯色绘制绑定的 1×1 白 LUT（着色器直接走顶点色，不采样渐变） */
+  private solidLut!: Texture;
+  /** 渐变 LUT 缓存（key = kind + stops，插入顺序即 LRU 顺序） */
+  private readonly gradLuts = new Map<string, Texture>();
+  /** 当前 `fill()/stroke()` 使用的画笔 */
+  private paint: ResolvedPaint = SOLID_PAINT;
 
   private viewW = 1;
   private viewH = 1;
@@ -78,69 +119,28 @@ export class Canvas2D {
     const canvasFormat = d.canvasFormat() ?? "rgba8unorm";
     this.viewBlock = new UniformBlock(d, { label: "2d-view", fields: [{ name: "u_viewProj", type: "mat4" }] });
 
-    const blend = {
-      color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
-      alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
-    };
-    const target = { format: canvasFormat, writeMask: ColorWriteMask.ALL, blend };
-
-    const flatLayout = d.createBindGroupLayout({
-      entries: [{ binding: 0, type: "uniform-buffer", visibility: 1, name: "ViewBlock" }],
+    // 两套管线共用同一份布局：UBO(view) + 纹理（渐变 LUT / 字形图集）+ 采样器。
+    // 「纯色」也走这条路径，只是绑 1×1 白纹理，由着色器按 kind 分支决定是否采样。
+    this.texLayout = d.createBindGroupLayout({
+      label: "2d-paint-layout",
+      entries: [
+        { binding: 0, type: "uniform-buffer", visibility: 1, name: "ViewBlock" },
+        { binding: 1, type: "texture", visibility: 2, name: "u_paintTex" },
+        { binding: 2, type: "sampler", visibility: 2, name: "u_paintTexSampler" },
+      ],
     });
-    const flatProgram = d.createProgram({
+    this.flatProgram = d.createProgram({
+      label: "2d-flat",
       glsl: { vertex: FLAT_VS_GLSL, fragment: FLAT_FS_GLSL },
       wgsl: { code: FLAT_WGSL },
     });
-    this.flatPipeline = d.createRenderPipeline({
-      label: "2d-flat-pipe",
-      program: flatProgram,
-      bindGroupLayouts: [flatLayout],
-      vertex: {
-        buffers: [
-          {
-            arrayStride: 24,
-            attributes: [
-              { location: 0, format: "float32x2", offset: 0 },
-              { location: 1, format: "float32x4", offset: 8 },
-            ],
-          },
-        ],
-      },
-      primitive: { topology: "triangle-list", cullMode: "none", frontFace: "ccw" },
-      targets: [target],
-    });
-    this.flatGroup = d.createBindGroup({ layout: flatLayout, entries: [{ binding: 0, resource: this.viewBlock.buffer }] });
-
-    this.texLayout = d.createBindGroupLayout({
-      entries: [
-        { binding: 0, type: "uniform-buffer", visibility: 1, name: "ViewBlock" },
-        { binding: 1, type: "texture", visibility: 2, name: "u_tex" },
-        { binding: 2, type: "sampler", visibility: 2, name: "u_texSampler" },
-      ],
-    });
-    const texProgram = d.createProgram({
+    this.texProgram = d.createProgram({
+      label: "2d-tex",
       glsl: { vertex: TEX_VS_GLSL, fragment: TEX_FS_GLSL },
       wgsl: { code: TEX_WGSL },
     });
-    this.texPipeline = d.createRenderPipeline({
-      label: "2d-tex-pipe",
-      program: texProgram,
-      bindGroupLayouts: [this.texLayout],
-      vertex: {
-        buffers: [
-          {
-            arrayStride: 32,
-            attributes: [
-              { location: 0, format: "float32x2", offset: 0 },
-              { location: 1, format: "float32x2", offset: 8 },
-              { location: 2, format: "float32x4", offset: 16 },
-            ],
-          },
-        ],
-      },
-      primitive: { topology: "triangle-list", cullMode: "none", frontFace: "ccw" },
-      targets: [target],
-    });
+    this.pipelineFormat = canvasFormat;
+
     this.sampler = d.createSampler({
       label: "2d-tex-sampler",
       addressModeU: "clamp-to-edge",
@@ -150,6 +150,146 @@ export class Canvas2D {
       mipmapFilter: "nearest",
       mips: false,
     });
+
+    // 纯色用的 1×1 白 LUT
+    this.solidLut = d.createTexture({
+      label: "2d-solid-lut",
+      width: 1,
+      height: 1,
+      format: "rgba8unorm",
+      usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+    });
+    this.solidLut.upload(new Uint8Array([255, 255, 255, 255]));
+
+    // 平铺先建好 1x/4x 两个常用采样数（4x 是本框架的默认画布采样数）
+    this.pipelineFor("flat", 1);
+    this.pipelineFor("tex", 1);
+    if ((d.limits.maxSamples ?? 1) >= 4) {
+      this.pipelineFor("flat", 4);
+      this.pipelineFor("tex", 4);
+    }
+  }
+
+  /** 取（或惰性创建）指定采样数下的管线；格式固定为画布格式（与 MSAA 目标一致） */
+  private pipelineFor(kind: "flat" | "tex", sampleCount: number): RenderPipeline {
+    const cache = kind === "flat" ? this.flatPipelines : this.texPipelines;
+    const count = Math.max(1, Math.floor(sampleCount));
+    let pipeline = cache.get(count);
+    if (pipeline) return pipeline;
+    const format = (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as Parameters<Device["createTexture"]>[0]["format"];
+    const blend = {
+      color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+      alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+    };
+    const target = { format, writeMask: ColorWriteMask.ALL, blend };
+    pipeline = this.device.createRenderPipeline({
+      label: `2d-${kind}-pipe${count > 1 ? `-msaa${count}` : ""}`,
+      program: kind === "flat" ? this.flatProgram : this.texProgram,
+      bindGroupLayouts: [this.texLayout],
+      vertex: {
+        buffers: [
+          kind === "flat"
+            ? {
+                // 见 shaders.ts 的顶点布局说明（渐变按用户空间逐像素求值）
+                arrayStride: 64,
+                attributes: [
+                  { location: 0, format: "float32x2" as const, offset: 0 },
+                  { location: 1, format: "float32x4" as const, offset: 8 },
+                  { location: 2, format: "float32x2" as const, offset: 24 },
+                  { location: 3, format: "float32x4" as const, offset: 32 },
+                  { location: 4, format: "float32x4" as const, offset: 48 },
+                ],
+              }
+            : {
+                arrayStride: 32,
+                attributes: [
+                  { location: 0, format: "float32x2" as const, offset: 0 },
+                  { location: 1, format: "float32x2" as const, offset: 8 },
+                  { location: 2, format: "float32x4" as const, offset: 16 },
+                ],
+              },
+        ],
+      },
+      primitive: { topology: "triangle-list", cullMode: "none", frontFace: "ccw" },
+      multisample: { count },
+      targets: [target],
+    });
+    cache.set(count, pipeline);
+    return pipeline;
+  }
+
+  /**
+   * 渐变 LUT：用浏览器的 `CanvasGradient` 光栅化成 512×1 纹理。
+   *
+   * 借原生实现生成 LUT 有两个好处：stop 之间的插值空间/取整规则与
+   * 原生 Canvas2D **完全一致**，而且 CPU 侧不需要再实现一遍插值。
+   * 按 `kind + stops` 缓存（同一渐变每帧重建也只光栅化一次）。
+   */
+  private gradientLut(kind: "linear" | "radial", stops: readonly GradientStop[]): Texture {
+    const key =
+      kind +
+      "|" +
+      stops
+        .map((s) => `${s.offset.toFixed(4)}:${Math.round(s.color.r * 255)},${Math.round(s.color.g * 255)},${Math.round(s.color.b * 255)},${s.color.a.toFixed(3)}`)
+        .join(";");
+    const hit = this.gradLuts.get(key);
+    if (hit) return hit;
+    const cv = document.createElement("canvas");
+    cv.width = GRADIENT_LUT_SIZE;
+    cv.height = 1;
+    const ctx = cv.getContext("2d");
+    if (!ctx) throw new Error("[unidraw] 无法创建 2D 画布用于渐变 LUT");
+    const g = ctx.createLinearGradient(0, 0, GRADIENT_LUT_SIZE, 0);
+    for (const s of stops) {
+      const r = Math.round(Math.max(0, Math.min(1, s.color.r)) * 255);
+      const gg = Math.round(Math.max(0, Math.min(1, s.color.g)) * 255);
+      const b = Math.round(Math.max(0, Math.min(1, s.color.b)) * 255);
+      const a = Math.max(0, Math.min(1, s.color.a));
+      g.addColorStop(Math.max(0, Math.min(1, s.offset)), `rgba(${r},${gg},${b},${a})`);
+    }
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, GRADIENT_LUT_SIZE, 1);
+    const px = ctx.getImageData(0, 0, GRADIENT_LUT_SIZE, 1).data;
+    const tex = this.device.createTexture({
+      label: `2d-${kind}-lut`,
+      width: GRADIENT_LUT_SIZE,
+      height: 1,
+      format: "rgba8unorm",
+      usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+    });
+    tex.upload(new Uint8Array(px));
+    this.gradLuts.set(key, tex);
+    if (this.gradLuts.size > GRADIENT_LUT_CACHE) {
+      const oldest = this.gradLuts.keys().next().value as string | undefined;
+      if (oldest !== undefined) {
+        this.gradLuts.get(oldest)?.destroy();
+        this.gradLuts.delete(oldest);
+      }
+    }
+    return tex;
+  }
+
+  /** 把当前样式解析成「顶点色 + 渐变几何 + LUT」 */
+  private resolvePaint(style: PaintStyle): ResolvedPaint {
+    const alpha = this.state.globalAlpha;
+    if (style instanceof LinearGradient) {
+      return {
+        kind: 1,
+        frame: [style.x0, style.y0, style.x1, style.y1, 0, 0, 1],
+        lut: this.gradientLut("linear", style.stops),
+        vcolor: [1, 1, 1, alpha],
+      };
+    }
+    if (style instanceof RadialGradient) {
+      return {
+        kind: 2,
+        frame: [0, 0, 0, 0, style.cx, style.cy, style.r],
+        lut: this.gradientLut("radial", style.stops),
+        vcolor: [1, 1, 1, alpha],
+      };
+    }
+    const c = typeof style === "string" ? hexColor(style) : (style as Color);
+    return { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [c.r, c.g, c.b, c.a * alpha] };
   }
 
   // ======================================================================
@@ -340,6 +480,11 @@ export class Canvas2D {
     let lastKind: "flat" | "text" | null = null;
     let lastClip: DeviceRect | null = null;
     let clipInit = false;
+    /** 当前绑定在 binding 1 的纹理（渐变 LUT / 字形图集） */
+    let lastTex: Texture | null = null;
+    // 管线必须与 pass 的采样数匹配（WebGPU 校验；WebGL2 不校验但同样要走对分支）
+    const flatPipeline = this.pipelineFor("flat", pass.sampleCount);
+    const texPipeline = this.pipelineFor("tex", pass.sampleCount);
 
     for (const op of this.ops) {
       const c = op.clip;
@@ -352,20 +497,24 @@ export class Canvas2D {
       if (lastKind !== op.kind) {
         lastKind = op.kind;
         if (op.kind === "flat") {
-          pass.setPipeline(this.flatPipeline);
-          pass.setBindGroup(0, this.flatGroup);
+          pass.setPipeline(flatPipeline);
           if (this.flatVBuf && this.flatIBuf) {
             pass.setVertexBuffer(0, this.flatVBuf);
             pass.setIndexBuffer(this.flatIBuf, "uint16");
           }
         } else {
-          pass.setPipeline(this.texPipeline);
-          pass.setBindGroup(0, this.glyphGroup(op.texture));
+          pass.setPipeline(texPipeline);
           if (this.textVBuf && this.textIBuf) {
             pass.setVertexBuffer(0, this.textVBuf);
             pass.setIndexBuffer(this.textIBuf, "uint16");
           }
         }
+      }
+      // 纹理绑定逐 op 变化（每个渐变一张 LUT、每个字符串一张字形图集）
+      const wantTex = (op.kind === "flat" ? (op.lut ?? this.solidLut) : op.texture) as Texture;
+      if (lastTex !== wantTex) {
+        pass.setBindGroup(0, this.textureGroup(wantTex));
+        lastTex = wantTex;
       }
       const n = op.iEnd - op.iStart;
       if (n > 0) pass.drawIndexed(n, 1, op.iStart, 0, 0);
@@ -373,7 +522,7 @@ export class Canvas2D {
   }
 
   private ensureCapacity(): void {
-    const flatVertCount = this.flatV.length / 6;
+    const flatVertCount = this.flatV.length / 16;
     if (flatVertCount > this.flatCap) {
       while (this.flatCap < flatVertCount) this.flatCap *= 2;
       this.freeBuffers("flat");
@@ -384,7 +533,7 @@ export class Canvas2D {
       this.freeBuffers("text");
     }
     if (!this.flatVBuf && flatVertCount > 0) {
-      this.flatVBuf = this.device.createBuffer({ size: this.flatCap * 24, usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+      this.flatVBuf = this.device.createBuffer({ size: this.flatCap * 64, usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
       this.flatIBuf = this.device.createBuffer({ size: this.flatCap * 3 * 2, usage: BufferUsage.INDEX | BufferUsage.COPY_DST });
     }
     if (!this.textVBuf && textVertCount > 0) {
@@ -407,8 +556,9 @@ export class Canvas2D {
     }
   }
 
-  private glyphGroup(texture: Texture): BindGroup {
-    let g = this.glyphGroups.get(texture);
+  /** 按纹理缓存 bind group（渐变 LUT 与字形图集共用同一份布局） */
+  private textureGroup(texture: Texture): BindGroup {
+    let g = this.textureGroups.get(texture);
     if (!g) {
       g = this.device.createBindGroup({
         layout: this.texLayout,
@@ -418,7 +568,7 @@ export class Canvas2D {
           { binding: 2, resource: this.sampler },
         ],
       });
-      this.glyphGroups.set(texture, g);
+      this.textureGroups.set(texture, g);
     }
     return g;
   }
@@ -431,19 +581,25 @@ export class Canvas2D {
     return transformPoint(this.state.ctm, x, y, { x: 0, y: 0 });
   }
 
+  /**
+   * 发射一个「平铺」顶点（纯色或渐变，stride 64，见 shaders.ts）。
+   *
+   * 渐变不在顶点上采样颜色，只把**用户空间坐标**和渐变几何带下去，
+   * 由片元着色器逐像素求 t 再查 LUT —— 这是与原生 Canvas2D 对齐的关键。
+   */
   private pushFlat(ux: number, uy: number): number {
-    const c = sampleStyle(this.state.fillStyle, ux, uy);
+    const paint = this.paint;
     const p = this.devPt(ux, uy);
-    const v = this.flatV.length / 6;
-    this.flatV.push(p.x, p.y, c.r, c.g, c.b, c.a * this.state.globalAlpha);
-    return v;
-  }
-
-  private pushFlatStyle(ux: number, uy: number, style: PaintStyle): number {
-    const c = sampleStyle(style, ux, uy);
-    const p = this.devPt(ux, uy);
-    const v = this.flatV.length / 6;
-    this.flatV.push(p.x, p.y, c.r, c.g, c.b, c.a * this.state.globalAlpha);
+    const v = this.flatV.length / 16;
+    const c = paint.vcolor;
+    const f = paint.frame;
+    this.flatV.push(
+      p.x, p.y,
+      c[0], c[1], c[2], c[3],
+      ux, uy,
+      paint.kind, f[0], f[1], f[2],
+      f[3], f[4], f[5], f[6],
+    );
     return v;
   }
 
@@ -461,7 +617,13 @@ export class Canvas2D {
 
   private recordFlat(iStart: number): void {
     if (this.flatI.length > iStart) {
-      this.ops.push({ kind: "flat", clip: this.state.clip ? { ...this.state.clip } : null, iStart, iEnd: this.flatI.length });
+      this.ops.push({
+        kind: "flat",
+        clip: this.state.clip ? { ...this.state.clip } : null,
+        iStart,
+        iEnd: this.flatI.length,
+        lut: this.paint.lut,
+      });
     }
   }
 
@@ -472,6 +634,7 @@ export class Canvas2D {
   fill(): void {
     const contours = this.path.flatten(0.2);
     if (contours.length === 0) return;
+    this.paint = this.resolvePaint(this.state.fillStyle);
     const iStart = this.flatI.length;
     for (const contour of contours) {
       const pts = contour.points;
@@ -521,12 +684,12 @@ export class Canvas2D {
   stroke(): void {
     const contours = this.path.flatten(0.2);
     if (contours.length === 0) return;
-    const style = this.state.strokeStyle;
+    this.paint = this.resolvePaint(this.state.strokeStyle);
     const hw = this.state.lineWidth / 2;
     const iStart = this.flatI.length;
 
     const quadRaw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number) => {
-      const p = (x: number, y: number) => this.pushFlatStyle(x, y, style);
+      const p = (x: number, y: number) => this.pushFlat(x, y);
       const v0 = p(ax, ay);
       const v1 = p(bx, by);
       const v2 = p(cx, cy);
@@ -542,11 +705,11 @@ export class Canvas2D {
 
     const fan = (cx: number, cy: number, a0: number, a1: number) => {
       const n = Math.max(2, Math.ceil((Math.abs(a1 - a0) / (Math.PI * 2)) * 64));
-      const vc = this.pushFlatStyle(cx, cy, style);
+      const vc = this.pushFlat(cx, cy);
       let prev = -1;
       for (let i = 0; i <= n; i++) {
         const t = a0 + ((a1 - a0) * i) / n;
-        const v = this.pushFlatStyle(cx + Math.cos(t) * hw, cy + Math.sin(t) * hw, style);
+        const v = this.pushFlat(cx + Math.cos(t) * hw, cy + Math.sin(t) * hw);
         if (prev >= 0) this.pushTri("flat", vc, prev, v);
         prev = v;
       }
@@ -622,17 +785,16 @@ export class Canvas2D {
     const bx = p1[0] + o2.x;
     const by = p1[1] + o2.y;
 
-    const style = this.state.strokeStyle;
     if (this.state.lineJoin === "round") {
       const a0 = Math.atan2(ay - p1[1], ax - p1[0]);
       const a1 = Math.atan2(by - p1[1], bx - p1[0]);
       const fan = (cxa: number, cya: number) => {
         const n = Math.max(2, Math.ceil((Math.abs(a1 - a0) / (Math.PI * 2)) * 64));
-        const vc = this.pushFlatStyle(cxa, cya, style);
+        const vc = this.pushFlat(cxa, cya);
         let prev = -1;
         for (let i = 0; i <= n; i++) {
           const t = a0 + ((a1 - a0) * i) / n;
-          const v = this.pushFlatStyle(p1[0] + Math.cos(t) * hw, p1[1] + Math.sin(t) * hw, style);
+          const v = this.pushFlat(p1[0] + Math.cos(t) * hw, p1[1] + Math.sin(t) * hw);
           if (prev >= 0) this.pushTri("flat", vc, prev, v);
           prev = v;
         }
@@ -645,18 +807,18 @@ export class Canvas2D {
       if (apex) {
         const ratio = Math.hypot(apex.x - p1[0], apex.y - p1[1]) / hw;
         if (ratio <= this.state.miterLimit) {
-          const va = this.pushFlatStyle(ax, ay, style);
-          const vb = this.pushFlatStyle(bx, by, style);
-          const vc = this.pushFlatStyle(apex.x, apex.y, style);
+          const va = this.pushFlat(ax, ay);
+          const vb = this.pushFlat(bx, by);
+          const vc = this.pushFlat(apex.x, apex.y);
           this.pushTri("flat", va, vb, vc);
           return;
         }
       }
     }
     // bevel（含 miter 超限回退）
-    const va = this.pushFlatStyle(ax, ay, style);
-    const vb = this.pushFlatStyle(bx, by, style);
-    const vc = this.pushFlatStyle(p1[0], p1[1], style);
+    const va = this.pushFlat(ax, ay);
+    const vb = this.pushFlat(bx, by);
+    const vc = this.pushFlat(p1[0], p1[1]);
     this.pushTri("flat", va, vb, vc);
   }
 
@@ -711,8 +873,8 @@ export class Canvas2D {
     const glyph = this.textRenderer.getGlyph(text, this.state.font);
     const style = this.state.fillStyle;
     const iStart = this.textI.length;
-    const left = x + glyph.left;
-    const top = y - glyph.ascent;
+    const left = x + glyph.offsetX;
+    const top = y + glyph.offsetY;
     const v0 = this.pushTextV(left, top, 0, 0, style);
     const v1 = this.pushTextV(left + glyph.width, top, 1, 0, style);
     const v2 = this.pushTextV(left + glyph.width, top + glyph.height, 1, 1, style);

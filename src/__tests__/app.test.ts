@@ -284,6 +284,43 @@ test("Renderer.resizeToDisplaySize：无 CSS 尺寸时不会每帧翻倍（反�
   }
 });
 
+test("Renderer：默认 4x MSAA（离屏 MSAA 目标 + 一次呈现 pass），msaa:1 时回到单 pass", () => {
+  const canvas = {
+    width: 64,
+    height: 48,
+    clientWidth: 64,
+    clientHeight: 48,
+    style: {},
+  } as unknown as HTMLCanvasElement;
+
+  // 默认：抗锯齿必须显式开启 —— WebGPU 的 canvas 没有隐式 MSAA，
+  // 2D 路径/斜线会变成硬锯齿（WebGL2 的 canvas 恰好默认 antialias:true，两端不一致）。
+  const device = createMockDevice();
+  const renderer = Renderer.fromDevice(device, canvas, {});
+  assert.equal(renderer.sampleCount, 4, "默认 msaa = 4（受 device.limits.maxSamples 限制）");
+  device.clearDrawCalls();
+  renderer.beginFrame();
+  renderer.endFrame();
+  // 画布 MSAA pass + 呈现 pass
+  assert.equal(device.passCount, 2, "MSAA 下每帧两个 pass（MSAA 画布 + 呈现）");
+  assert.equal(device.drawCalls.length, 1, "呈现 pass 画一个全屏三角形");
+  const attach = device.drawCalls[0]!.passIndex;
+  assert.equal(attach, 2);
+
+  // 逐像素对照需要稳定的采样数：显式关掉后只剩画布 pass
+  const planarDevice = createMockDevice();
+  const planar = Renderer.fromDevice(planarDevice, canvas, { msaa: 1 });
+  assert.equal(planar.sampleCount, 1);
+  planarDevice.clearDrawCalls();
+  planar.beginFrame();
+  planar.endFrame();
+  assert.equal(planarDevice.passCount, 1, "msaa:1 下每帧一个 pass");
+  assert.equal(planarDevice.drawCalls.length, 0, "无呈现 pass");
+
+  renderer.destroy();
+  planar.destroy();
+});
+
 test("App：插件异步 setup 被等待（useAsync），use 返回可链式", async () => {
   const device = createMockDevice();
   const app = App.fromDevice(device, fakeCanvas(), { depth: false, input: false, autoResize: false });

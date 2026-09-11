@@ -129,7 +129,12 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   window.addEventListener("unhandledrejection", (e) => (errEl.textContent = `[promise] ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
 
   // ---- 设备 / 相机 -------------------------------------------------------
-  const renderer = await Renderer.create(canvas, { backend: backendFromUrl() as "auto" | "webgpu" | "webgl2" | "mock" });
+  // 性能档位示例显式关掉 MSAA：它们测的是 draw call / 三角形吞吐，
+  // 4x MSAA 会额外引入 4 倍填充率与一次全屏呈现，掩盖被测项（观感对比请用其它示例）。
+  const renderer = await Renderer.create(canvas, {
+    backend: backendFromUrl() as "auto" | "webgpu" | "webgl2" | "mock",
+    msaa: 1,
+  });
   chip.textContent = renderer.device.kind + " · " + renderer.device.info.name;
 
   // 自动化探针钩子（无副作用）

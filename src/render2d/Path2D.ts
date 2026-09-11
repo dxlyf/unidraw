@@ -1,6 +1,6 @@
 import type { Pt2 } from "./matrix.js";
 import type { Contour, PathOp } from "./pathTypes.js";
-import { TAU, curveSteps } from "./pathTypes.js";
+import { TAU } from "./pathTypes.js";
 
 export class Path2D {
   private ops: PathOp[] = [];
@@ -150,7 +150,6 @@ export class Path2D {
     void startX;
     void startY;
 
-    const segs = curveSteps(tolerance);
     for (const op of this.ops) {
       switch (op.type) {
         case "move": {
@@ -197,7 +196,7 @@ export class Path2D {
           } else {
             while (delta > 0) delta -= TAU;
           }
-          const n = Math.max(2, Math.ceil((Math.abs(delta) / TAU) * Math.max(16, segs * 4)));
+          const n = this.arcStepCount(delta, Math.max(rx, ry), tolerance);
           const cos = Math.cos(rot);
           const sin = Math.sin(rot);
           for (let i = 1; i <= n; i++) {
@@ -214,7 +213,7 @@ export class Path2D {
         case "arcTo": {
           ensure();
           const s = cur!.length;
-          const pts = this.arcToPoints(px, py, op.x1, op.y1, op.x2, op.y2, op.r);
+          const pts = this.arcToPoints(px, py, op.x1, op.y1, op.x2, op.y2, op.r, tolerance);
           for (let i = 0; i < pts.length; i++) cur!.push(pts[i]!);
           if (cur!.length === s) cur!.push([op.x2, op.y2]);
           px = op.x2;
@@ -306,7 +305,21 @@ export class Path2D {
     this.flattenCubicTo(midX, midY, n2x, n2y, m3x, m3y, bx, by, tol, depth + 1, out);
   }
 
-  private arcToPoints(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, radius: number): Pt2[] {
+  /**
+   * 由容差反推圆弧的最大步进角：弦高 sagitta = R·(1 − cos(θ/2)) ≤ tol。
+   *
+   * 早期实现用 `max(16, …)` 之类的**固定段数**，半径一大弦高就超容差
+   * （半径 22 的圆角只用 2 段 → 弦高约 1.7px，肉眼可见的“折角”）。
+   */
+  private arcStepCount(sweep: number, radius: number, tol: number): number {
+    const r = Math.max(1e-6, radius);
+    const ratio = Math.max(-1, Math.min(1, 1 - tol / r));
+    const maxStep = 2 * Math.acos(ratio);
+    // 半径极大时步进角趋近 0（段数 → ∞），加个上限避免病态输入把顶点数炸掉
+    return Math.min(2048, Math.max(2, Math.ceil(Math.abs(sweep) / Math.max(1e-4, maxStep))));
+  }
+
+  private arcToPoints(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, radius: number, tol: number): Pt2[] {
     const d01 = Math.hypot(x1 - x0, y1 - y0);
     const d12 = Math.hypot(x2 - x1, y2 - y1);
     if (d01 < 1e-9 || d12 < 1e-9 || radius <= 0) return [[x1, y1]];
@@ -334,20 +347,20 @@ export class Path2D {
     const cdist = r / Math.sin(delta / 2);
     const cx = x1 + (bisx / bl) * cdist;
     const cy = y1 + (bisy / bl) * cdist;
-    const cross = ax * by - ay * bx;
     const n0x = t0x - cx;
     const n0y = t0y - cy;
     const n1x = t1x - cx;
     const n1y = t1y - cy;
     const a0 = Math.atan2(n0y, n0x);
-    const n = Math.max(2, Math.ceil((Math.PI / 2) * Math.sqrt(2 / r) * 4));
-    // 沿 cross 方向扫过短弧（corner 一侧的圆弧）
+    // 沿**带符号**夹角扫过短弧（corner 一侧的圆弧）。
+    // `full` 的正负号已经编码了正确的扫掠方向，早期实现又乘了一个
+    // `dir = cross >= 0 ? 1 : -1`，方向被翻反 → 圆弧朝形状内部鼓出去，
+    // 画出来的圆角是「缺角」，和原生 Canvas2D 完全不同。
     const full = Math.atan2(n0x * n1y - n0y * n1x, n0x * n1x + n0y * n1y);
-    const dir = cross >= 0 ? 1 : -1;
-    const sweep = dir * Math.abs(full);
+    const n = this.arcStepCount(full, r, tol);
     const out: Pt2[] = [];
     for (let i = 1; i <= n; i++) {
-      const t = a0 + (sweep * i) / n;
+      const t = a0 + (full * i) / n;
       out.push([cx + r * Math.cos(t), cy + r * Math.sin(t)]);
     }
     return out;

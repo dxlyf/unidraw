@@ -135,6 +135,9 @@ bootDemo({
       bindGroupLayouts: [layout],
       vertex: vertexState,
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less-equal" },
+      // 手写管线必须声明与 render pass 一致的采样数：Renderer 默认开 4x MSAA
+      // （WebGPU 会严格校验，不匹配时整帧命令缓冲作废）。
+      multisample: { count: ctx.renderer.sampleCount },
       targets: [{ format: device.canvasFormat()! }],
     });
 

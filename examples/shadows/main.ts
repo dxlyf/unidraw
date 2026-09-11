@@ -26,7 +26,7 @@ import { Vec3 } from "../../src/math/vec3.js";
 import { degToRad } from "../../src/math/mmath.js";
 import { AmbientLight, DirectionalLight, SpotLight } from "../../src/render/lights/index.js";
 import { RenderTarget } from "../../src/render/RenderTarget.js";
-import { FullScreenPass, POSTFX_COMMON_GLSL, POSTFX_COMMON_WGSL } from "../../src/render/postfx/index.js";
+import { FullScreenPass, POSTFX_COMMON_GLSL } from "../../src/render/postfx/index.js";
 import { ShadowRenderer } from "../../src/render/shadow/index.js";
 import { InputManager } from "../../src/interaction/InputManager.js";
 import { attachOrbitControls } from "../common/demo.js";
@@ -530,6 +530,9 @@ async function readShadowMapPixels(size = 128): Promise<Uint8Array | null> {
     name: "read-shadow-map",
     nearest: true,
     targetFormat: target.format,
+    // 输入是**深度纹理**：WebGPU 必须声明 depth 采样类型 + `texture_depth_2d`，
+    // 否则绑定校验失败（整帧命令作废、回读全是 0，mapJitter 会假通过）。
+    textureSampleType: "depth",
     fragment: {
       glsl: `#version 300 es
 precision highp float;
@@ -539,7 +542,19 @@ void main() {
   fragColor = vec4(vec3(d), 1.0);
 }`,
       wgsl: `
-${POSTFX_COMMON_WGSL}
+struct ParamsBlock {
+  u_texelSize : vec4f,
+  u_params : vec4f,
+  u_params2 : vec4f,
+};
+@group(0) @binding(0) var<uniform> fx : ParamsBlock;
+@group(0) @binding(1) var u_input : texture_depth_2d;
+@group(0) @binding(2) var u_inputSampler : sampler;
+
+struct FSIn {
+  @builtin(position) clip_pos : vec4f,
+  @location(0) v_uv : vec2f,
+};
 @fragment
 fn fs_main(in : FSIn) -> @location(0) vec4f {
   let texSize = vec2f(textureDimensions(u_input, 0));
@@ -582,6 +597,8 @@ async function inspectShadowMap(): Promise<Record<string, number | string>> {
     name: "show-shadow-map",
     nearest: true,
     targetFormat: target.format,
+    // 同 readShadowMapPixels：深度纹理必须声明 depth 采样类型
+    textureSampleType: "depth",
     fragment: {
       glsl: `#version 300 es
 precision highp float;
@@ -592,7 +609,19 @@ void main() {
   fragColor = vec4(vec3(d), 1.0);
 }`,
       wgsl: `
-${POSTFX_COMMON_WGSL}
+struct ParamsBlock {
+  u_texelSize : vec4f,
+  u_params : vec4f,
+  u_params2 : vec4f,
+};
+@group(0) @binding(0) var<uniform> fx : ParamsBlock;
+@group(0) @binding(1) var u_input : texture_depth_2d;
+@group(0) @binding(2) var u_inputSampler : sampler;
+
+struct FSIn {
+  @builtin(position) clip_pos : vec4f,
+  @location(0) v_uv : vec2f,
+};
 @fragment
 fn fs_main(in : FSIn) -> @location(0) vec4f {
   let texSize = vec2f(textureDimensions(u_input, 0));

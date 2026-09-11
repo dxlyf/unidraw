@@ -260,6 +260,27 @@ textIBuf.write(textIndices);   // ← 把**当前 VAO**（flat 的 VAO）的索�
 > 不是内容缺失。做逐像素对比时请挑**粗几何/填充**区域，或给 WebGL2 传
 > `antialias: false`。
 
+### 6.3 MSAA 与「全屏拷贝的垂直方向」（`Renderer` 默认 4x MSAA）
+
+- **为什么默认开 MSAA**：几何边缘抗锯齿在两种后端上必须**显式开启**才一致 ——
+  WebGL2 的 canvas 上下文默认 `antialias: true`（隐式 MSAA），WebGPU 的 canvas
+  完全没有 MSAA。CPU 三角化出来的 2D 路径/斜线/圆弧在 WebGPU 上因此是硬锯齿，
+  与原生 Canvas2D（永远抗锯齿）差距很大；
+- 实现：`Renderer.beginFrame()` 渲染进一张离屏 MSAA 目标（`RenderTarget`），
+  `endFrame()` 再开一个 pass 把解析结果拷到画布。`sampleCount` 会在
+  `device.limits.maxSamples` 处自动降级；
+- **手写管线必须声明采样数**：`createRenderPipeline` 默认 `multisample.count = 1`，
+  WebGPU 会严格校验「管线采样数 == pass 附件采样数」，不一致时**整帧命令缓冲作废**
+  （表现是画面缺内容但 `#err` 为空）。手写管线请写
+  `multisample: { count: ctx.renderer.sampleCount }`（或改用材质，材质内部会按
+  `pass.sampleCount` 自动建对应版本）。同理，离屏/阴影这类 1x 目标的管线要显式写 1；
+- **全屏拷贝的垂直方向在两端相反**：全屏三角形把 `uv=(0,0)` 放在 NDC 左下角，而
+  **渲染出来的纹理**行序不同 —— WebGL2 的 NDC 上边落在内存最后一行，WebGPU 的
+  NDC 上边就是内存第 0 行。后处理链内部「采样 → 写入」两端同约定、翻转自相抵消，
+  所以只有**把几何渲染产物直接呈现到画布**（MSAA 解析结果）时才会暴露：
+  WebGPU 必须翻转 V（`CopyPassOptions.flipY`），否则整幅画面上下颠倒。
+  回归页：`examples/_verify-2d-parity` + `examples/shapes2d` 的跨后端对照。
+
 ## 7. 纹理上传
 
 CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种后端：

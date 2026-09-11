@@ -102,7 +102,7 @@ npm run typecheck      # 严格类型检查（src + examples + tests）
 npm test               # 构建并运行全部测试（97 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
-npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere / _verify-2d-clip）到 dist-examples/
+npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere / _verify-2d-clip / _verify-2d-parity）
 npm run serve          # 本地静态服务 → http://localhost:8080/
 ```
 
@@ -126,7 +126,11 @@ WebGL2 / WebGPU 共用一套实现：
 - 性能：CPU 三角化 → 动态合批，每帧少量 `drawIndexed`。
 
 `examples/shapes2d` 展示了上述全部能力（含动画与裁剪层叠）。
-模块用法与边界见 [docs/render2d.md](docs/render2d.md)；
+渐变为**逐像素求值**（LUT 由浏览器 `CanvasGradient` 生成，插值规则与原生一致），
+文字落点按 `actualBoundingBox*` 对齐到原生基线；
+「与原生的差距」有量化对照页：`examples/_verify-2d-parity`（同场景喂给原生
+`CanvasRenderingContext2D` 与本框架，逐像素比较并按图元分区报数，当前整幅平均差
+≈ 0.55/255）。模块用法与边界见 [docs/render2d.md](docs/render2d.md)；
 「彩色图形 + 文本两套缓冲」在 WebGL2 上的索引绑定回归见
 [docs/architecture.md §6.2](docs/architecture.md)（回归页 `examples/_verify-2d-clip`）。
 

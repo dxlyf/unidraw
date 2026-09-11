@@ -9,16 +9,24 @@ import { TextureUsage } from "../gpu/types.js";
 
 export interface GlyphInfo {
   texture: Texture;
-  /** 纹素尺寸 */
+  /** 纹素尺寸（图集里这段文字的位图大小） */
   width: number;
   height: number;
-  /** 相对基线锚点：文字最左墨迹相对 x 的偏移 */
-  left: number;
-  /** 基线到字形顶部的距离（向上） */
-  ascent: number;
+  /**
+   * 图集左上角相对**对齐点**的水平偏移（`fillText` 的 x）。
+   *
+   * 常见误区：不能直接把 `actualBoundingBoxLeft` 当偏移。规范里
+   * `actualBoundingBoxLeft` 是「对齐点 → 墨迹左边界」的距离（向左为正），
+   * 所以墨迹左边界 = 对齐点 − `actualBoundingBoxLeft`；图集左边还要再留 `pad`。
+   */
+  offsetX: number;
+  /** 图集上边缘相对**基线**的垂直偏移（`fillText` 的 y）；向上为负 */
+  offsetY: number;
 }
 
 const MAX_GLYPHS = 96;
+/** 图集四周留白（纹素），避免线性采样时采到相邻内容/边界 */
+const PAD = 2;
 
 function hasDocument(): boolean {
   return typeof document !== "undefined";
@@ -58,6 +66,16 @@ export class TextRenderer {
     return glyph;
   }
 
+  /**
+   * 栅格化一段文字到纹理。
+   *
+   * 位置约定（要让 `fillText(text,x,y)` 的落点和原生 Canvas2D 一致）：
+   * - 图集内**对齐点**（`textAlign:"left"` + `textBaseline:"alphabetic"` 的原点）
+   *   放在 `(PAD - inkLeft, PAD - inkTop)`，于是墨迹左边界/上边界正好落在
+   *   `PAD` 处，四周各留 `PAD` 纹素；
+   * - 绘制时四边形左上角 = `(x + offsetX, y + offsetY)`，其中
+   *   `offsetX = inkLeft - PAD`、`offsetY = inkTop - PAD`。
+   */
   private rasterize(text: string, font: string): GlyphInfo {
     if (!hasDocument()) {
       throw new Error("[unidraw] fillText 需要浏览器环境（依赖 DOM canvas 栅格化字形）");
@@ -69,14 +87,17 @@ export class TextRenderer {
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     const m = ctx.measureText(text);
-    const pad = 2;
     const hasActual = typeof m.actualBoundingBoxLeft === "number";
+    // 墨迹包围盒（相对对齐点/基线）
     const bboxLeft = hasActual ? m.actualBoundingBoxLeft : 0;
     const bboxRight = hasActual ? m.actualBoundingBoxRight : m.width;
     const ascent = hasActual ? Math.max(1, m.actualBoundingBoxAscent) : Math.ceil(parseFloat(font) * 0.8 || 20);
     const descent = hasActual ? Math.max(1, m.actualBoundingBoxDescent) : Math.ceil(parseFloat(font) * 0.2 || 5);
-    const w = Math.max(1, Math.ceil(bboxRight - bboxLeft) + pad * 2);
-    const h = Math.max(1, Math.ceil(ascent + descent) + pad * 2);
+    // 墨迹边界相对对齐点：inkLeft 向右为正（= −bboxLeft），inkTop 向上为负（= −ascent）
+    const inkLeft = -bboxLeft;
+    const inkTop = -ascent;
+    const w = Math.max(1, Math.ceil(bboxRight + inkLeft) + PAD * 2);
+    const h = Math.max(1, Math.ceil(ascent + descent) + PAD * 2);
     canvas.width = w;
     canvas.height = h;
     const g = canvas.getContext("2d", { willReadFrequently: true });
@@ -86,7 +107,7 @@ export class TextRenderer {
     g.textBaseline = "alphabetic";
     g.clearRect(0, 0, w, h);
     g.fillStyle = "#ffffff";
-    g.fillText(text, pad - bboxLeft, pad + ascent);
+    g.fillText(text, PAD - inkLeft, PAD - inkTop);
 
     const image = g.getImageData(0, 0, w, h);
     const texture = this.device.createTexture({
@@ -97,7 +118,7 @@ export class TextRenderer {
       usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
     });
     texture.upload(image.data);
-    return { texture, width: w, height: h, left: bboxLeft, ascent };
+    return { texture, width: w, height: h, offsetX: inkLeft - PAD, offsetY: inkTop - PAD };
   }
 
   clear(): void {

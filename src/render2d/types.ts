@@ -18,7 +18,14 @@ export interface DeviceRect {
 }
 
 export type Op =
-  | { kind: "flat"; clip: DeviceRect | null; iStart: number; iEnd: number }
+  | {
+      kind: "flat";
+      clip: DeviceRect | null;
+      iStart: number;
+      iEnd: number;
+      /** 渐变 LUT 纹理（纯色为 null → 绑 1x1 白纹理，着色器直接走顶点色） */
+      lut: Texture | null;
+    }
   | { kind: "text"; clip: DeviceRect | null; texture: Texture; iStart: number; iEnd: number };
 
 export interface SavedState {
