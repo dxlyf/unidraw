@@ -102,6 +102,25 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
   对齐点/基线**的偏移（`offsetX/offsetY`），不是直接当坐标用；
 - `maxWidth` 通过横向压缩四边形实现（视觉等价于原生压缩字距）。
 
+### 合成模式
+- `globalCompositeOperation`（随 `save/restore` 压栈）。**已支持**（全部是硬件混合状态，
+  单 pass 完成，不需要把目标读成纹理）：
+  - Porter-Duff 全家桶：`source-over` / `destination-over` / `source-in` / `destination-in` /
+    `source-out` / `destination-out` / `source-atop` / `destination-atop` / `xor` /
+    `lighter` / `copy`；
+  - 可分离混合模式里能用混合因子/方程表达的：`multiply`（`dst` 因子）、
+    `screen`（`one-minus-dst`）、`darken` / `lighten`（`min` / `max` 混合方程）；
+- 「源覆盖率为 0 的区域也要一起算」的模式（`copy` / `source-in` / `source-out` /
+  `destination-in` / `destination-atop`）会额外画一块**路径补集**（画布矩形 − 路径，
+  用 evenodd 求得）并带上同一混合状态，语义与原生一致；
+- **不支持**：`overlay` / `color-dodge` / `color-burn` / `hard-light` / `soft-light` /
+  `difference` / `exclusion` / `hue` / `saturation` / `color` / `luminosity` ——
+  它们需要「以目标为输入的着色器」（2D 图层 + ping-pong）。设置时会**告警一次**
+  并回退到 `source-over`；
+- 混合模式的透明度处理是**硬件近似**：`multiply`/`screen`/`darken`/`lighten` 在
+  **不透明底图**上与原生逐像素一致，半透明源与 W3C 的完整公式有微小差异
+  （对照实测每格平均差 3~5/255）。
+
 ### 虚线
 - `setLineDash(segments)` / `getLineDash()` / `lineDashOffset`，随 `save/restore` 压栈；
 - 按**弧长**在压平后的折线上推进，奇数长度的模式复制一遍（`[5]` ≡ `[5,5]`），
@@ -124,8 +143,8 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
   半透明粗描边在接头处会比原生略深；
 - 圆角 join 用扇形逼近；
 - 字形纹理在 DPR>1 时以设备像素栅格化（缩小绘制可能略糊，可后续按 DPR 缓存）；
-- 尚未支持：`shadowBlur`、`drawImage`/`createPattern`、
-  `globalCompositeOperation`（这些在框架层可以直接用渲染目标/混合模式自己搭）。
+- 尚未支持：`shadowBlur`、`drawImage`/`createPattern`，以及需要「目标作为纹理」的
+  合成模式（`overlay` / `difference` / `hue` 等 11 种）。
 
 ## 与原生的差距（量化）
 
@@ -148,7 +167,10 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 nonzero 反向挖洞 / 自相交五角星），整幅平均差 ≈ 0.10，各分区 ≤ 0.32；
 `?scene=extras` 验证虚线（不同 pattern/offset/线头）与文字 API
 （textAlign / textBaseline / strokeText / measureText），整幅 ≈ 0.63，
-其中虚线 0.18、textAlign 0.60、strokeText 0.49、textBaseline 1.91。
+其中虚线 0.18、textAlign 0.60、strokeText 0.49、textBaseline 1.91；
+`?scene=composite` 验证 14 种合成模式：9 种 Porter-Duff 模式**逐像素完全一致（0.00）**，
+`copy` / `multiply` / `screen` / `darken` / `lighten` 平均差 3~5（圆边抗锯齿与
+半透明混合的近似）。
 
 继续排查时应先看这张表：哪个区域掉下去，就说明对应图元的求值/栅格化方式跑偏了。
 

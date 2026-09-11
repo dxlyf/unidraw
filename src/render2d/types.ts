@@ -23,16 +23,18 @@ export interface DeviceRect {
   h: number;
 }
 
-export type Op =
-  | {
-      kind: "flat";
-      clip: DeviceRect | null;
-      iStart: number;
-      iEnd: number;
-      /** 渐变 LUT 纹理（纯色为 null → 绑 1x1 白纹理，着色器直接走顶点色） */
-      lut: Texture | null;
-    }
-  | { kind: "text"; clip: DeviceRect | null; texture: Texture; iStart: number; iEnd: number };
+export interface Op {
+  kind: "flat" | "text";
+  clip: DeviceRect | null;
+  iStart: number;
+  iEnd: number;
+  /** 合成模式（决定管线里的混合状态；同 kind 不同模式要换管线） */
+  comp: string;
+  /** 渐变 LUT 纹理（纯色为 null → 绑 1x1 白纹理，着色器直接走顶点色） */
+  lut?: Texture | null;
+  /** 文字图集纹理（kind === "text"） */
+  texture?: Texture;
+}
 
 export interface SavedState {
   ctm: Affine;
@@ -49,6 +51,8 @@ export interface SavedState {
   /** 虚线样式（空数组 = 实线） */
   lineDash: number[];
   lineDashOffset: number;
+  /** 合成模式（`globalCompositeOperation`） */
+  globalCompositeOperation: string;
   clip: DeviceRect | null;
 }
 

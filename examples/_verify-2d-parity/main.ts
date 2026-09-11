@@ -57,6 +57,7 @@ interface SceneCtx {
   lineDashOffset: number;
   textAlign: string;
   textBaseline: string;
+  globalCompositeOperation: string;
   save(): void;
   restore(): void;
   translate(x: number, y: number): void;
@@ -268,6 +269,70 @@ function drawTextDash(c: SceneCtx): void {
   void w;
 }
 
+/** 合成模式场景：每个模式一块「底图 + 叠加形状」，与原生逐块对照 */
+const COMPOSITE_MODES = [
+  "destination-over",
+  "source-in",
+  "destination-in",
+  "source-out",
+  "destination-out",
+  "source-atop",
+  "destination-atop",
+  "xor",
+  "lighter",
+  "copy",
+  "multiply",
+  "screen",
+  "darken",
+  "lighten",
+] as const;
+
+const COMPOSITE_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [];
+const CELL_W = 78;
+const CELL_H = 66;
+COMPOSITE_MODES.forEach((mode, i) => {
+  const col = i % 6;
+  const row = Math.floor(i / 6);
+  COMPOSITE_REGIONS.push({ name: mode, x: col * CELL_W + 4, y: row * CELL_H + 4, w: CELL_W - 8, h: CELL_H - 8 });
+});
+
+/** 每个单元格：先画底图（不透明渐变块 + 透明区），再用指定模式叠加一个圆 */
+function drawComposite(c: SceneCtx): void {
+  c.fillStyle = "#0b0c10";
+  c.fillRect(0, 0, W, H);
+  c.font = `600 10px ${FONT}`;
+
+  COMPOSITE_MODES.forEach((mode, i) => {
+    const col = i % 6;
+    const row = Math.floor(i / 6);
+    const x = col * CELL_W + 6;
+    const y = row * CELL_H + 6;
+    const w = CELL_W - 12;
+    const h = CELL_H - 18;
+
+    // 底图：左半不透明青、右半不透明橙，整体是实心矩形
+    c.globalCompositeOperation = "source-over";
+    c.globalAlpha = 1;
+    c.fillStyle = "#35d7ee";
+    c.fillRect(x, y, w * 0.55, h);
+    c.fillStyle = "#ff9a3d";
+    c.fillRect(x + w * 0.45, y, w * 0.55, h);
+
+    // 叠加一个半透明圆，使用当前合成模式
+    c.globalCompositeOperation = mode;
+    c.fillStyle = "#f5d02e";
+    c.globalAlpha = 0.75;
+    c.beginPath();
+    c.arc(x + w * 0.5, y + h * 0.5, Math.min(w, h) * 0.42, 0, Math.PI * 2);
+    c.fill();
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = "source-over";
+
+    c.fillStyle = "#8b93a7";
+    c.fillText(mode, x, y + h + 12);
+  });
+}
+
 function drawScene(c: SceneCtx, g: GradientFactory): void {
   // 背景：竖向线性渐变（整幅不透明，两侧都从透明画到不透明）
   const bg = g.linear(0, 0, 0, H);
@@ -417,6 +482,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   parity: { label: "全能力", draw: drawScene, regions: REGIONS },
   fillrules: { label: "填充规则", draw: (c) => drawFillRules(c), regions: FILL_REGIONS },
   extras: { label: "虚线/文字API", draw: (c) => drawTextDash(c), regions: EXTRAS_REGIONS },
+  composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
 };
 const sceneId = params.get("scene") ?? "parity";
 const scene = SCENES[sceneId] ?? SCENES.parity!;

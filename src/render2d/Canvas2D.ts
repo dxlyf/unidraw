@@ -15,6 +15,8 @@ import { RadialGradient } from "./RadialGradient.js";
 import { Path2D } from "./path.js";
 import { fillTriangles, type FillRule } from "./fill.js";
 import type { Contour } from "./pathTypes.js";
+import { blendForComposite } from "./composite.js";
+import { logger } from "../util/logger.js";
 import type { Pt2 } from "./matrix.js";
 import { identityAffine, copyAffine, multiplyAffine, transformPoint } from "./matrix.js";
 import { FLAT_FS_GLSL, FLAT_VS_GLSL, FLAT_WGSL, TEX_FS_GLSL, TEX_VS_GLSL, TEX_WGSL } from "./shaders.js";
@@ -74,8 +76,8 @@ export class Canvas2D {
    * 所以 2D 也必须有 4x 版本，否则 WebGPU 直接校验失败、整层 2D 内容静默消失
    * （WebGL2 不校验，所以只在 WebGPU 上暴露）。
    */
-  private readonly flatPipelines = new Map<number, RenderPipeline>();
-  private readonly texPipelines = new Map<number, RenderPipeline>();
+  private readonly flatPipelines = new Map<string, RenderPipeline>();
+  private readonly texPipelines = new Map<string, RenderPipeline>();
   private sampler!: Sampler;
   private readonly textureGroups = new WeakMap<Texture, BindGroup>();
   private pipelineFormat: string | null = null;
@@ -85,6 +87,8 @@ export class Canvas2D {
   private readonly gradLuts = new Map<string, Texture>();
   /** 当前 `fill()/stroke()` 使用的画笔 */
   private paint: ResolvedPaint = SOLID_PAINT;
+  /** 已告警过的不支持合成模式（每种只提醒一次） */
+  private readonly warnedComposite = new Set<string>();
 
   private viewW = 1;
   private viewH = 1;
@@ -106,6 +110,7 @@ export class Canvas2D {
     textBaseline: "alphabetic",
     lineDash: [],
     lineDashOffset: 0,
+    globalCompositeOperation: "source-over",
     clip: null,
   };
 
@@ -175,20 +180,18 @@ export class Canvas2D {
     }
   }
 
-  /** 取（或惰性创建）指定采样数下的管线；格式固定为画布格式（与 MSAA 目标一致） */
-  private pipelineFor(kind: "flat" | "tex", sampleCount: number): RenderPipeline {
+  /** 取（或惰性创建）指定采样数 + 合成模式下的管线；格式固定为画布格式（与 MSAA 目标一致） */
+  private pipelineFor(kind: "flat" | "tex", sampleCount: number, comp = "source-over"): RenderPipeline {
     const cache = kind === "flat" ? this.flatPipelines : this.texPipelines;
     const count = Math.max(1, Math.floor(sampleCount));
-    let pipeline = cache.get(count);
+    const key = `${count}|${comp}`;
+    let pipeline = cache.get(key);
     if (pipeline) return pipeline;
     const format = (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as Parameters<Device["createTexture"]>[0]["format"];
-    const blend = {
-      color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
-      alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
-    };
+    const blend = blendForComposite(comp) ?? blendForComposite("source-over")!;
     const target = { format, writeMask: ColorWriteMask.ALL, blend };
     pipeline = this.device.createRenderPipeline({
-      label: `2d-${kind}-pipe${count > 1 ? `-msaa${count}` : ""}`,
+      label: `2d-${kind}-pipe${count > 1 ? `-msaa${count}` : ""}${comp === "source-over" ? "" : `-${comp}`}`,
       program: kind === "flat" ? this.flatProgram : this.texProgram,
       bindGroupLayouts: [this.texLayout],
       vertex: {
@@ -219,7 +222,7 @@ export class Canvas2D {
       multisample: { count },
       targets: [target],
     });
-    cache.set(count, pipeline);
+      cache.set(key, pipeline);
     return pipeline;
   }
 
@@ -384,6 +387,33 @@ export class Canvas2D {
   set lineDashOffset(v: number) {
     this.state.lineDashOffset = Number.isFinite(v) ? v : 0;
   }
+  /**
+   * 合成模式（与原生同名）。
+   *
+   * 已支持：source-over / destination-over / source-in / destination-in / source-out /
+   * destination-out / source-atop / destination-atop / xor / lighter / copy /
+   * multiply / screen / darken / lighten（都是硬件混合状态，单 pass 完成）。
+   * 其余模式（overlay / color-dodge / hard-light / difference / hue …）需要「以目标
+   * 为输入的着色器」，会告警一次并回退到 source-over。
+   */
+  get globalCompositeOperation(): string {
+    return this.state.globalCompositeOperation;
+  }
+  set globalCompositeOperation(v: string) {
+    if (!blendForComposite(v)) {
+      if (!this.warnedComposite.has(v)) {
+        this.warnedComposite.add(v);
+        logger.warn(
+          `[unidraw] Canvas2D 暂不支持 globalCompositeOperation = "${v}"，已回退为 source-over。` +
+            `支持的模式：source-over/destination-over/source-in/destination-in/source-out/destination-out/` +
+            `source-atop/destination-atop/xor/lighter/copy/multiply/screen/darken/lighten。`,
+        );
+      }
+      this.state.globalCompositeOperation = "source-over";
+      return;
+    }
+    this.state.globalCompositeOperation = v;
+  }
 
   save(): void {
     this.stack.push({
@@ -399,6 +429,7 @@ export class Canvas2D {
       textAlign: this.state.textAlign,
       textBaseline: this.state.textBaseline,
       lineDash: [...this.state.lineDash],
+      globalCompositeOperation: this.state.globalCompositeOperation,
       lineDashOffset: this.state.lineDashOffset,
       clip: this.state.clip ? { ...this.state.clip } : null,
     });
@@ -521,14 +552,12 @@ export class Canvas2D {
       this.textIBuf!.write(new Uint16Array(this.textI));
     }
 
-    let lastKind: "flat" | "text" | null = null;
     let lastClip: DeviceRect | null = null;
     let clipInit = false;
     /** 当前绑定在 binding 1 的纹理（渐变 LUT / 字形图集） */
     let lastTex: Texture | null = null;
-    // 管线必须与 pass 的采样数匹配（WebGPU 校验；WebGL2 不校验但同样要走对分支）
-    const flatPipeline = this.pipelineFor("flat", pass.sampleCount);
-    const texPipeline = this.pipelineFor("tex", pass.sampleCount);
+    /** 当前管线（kind + 合成模式 + 采样数 的组合） */
+    let lastPipeKey: string | null = null;
 
     for (const op of this.ops) {
       const c = op.clip;
@@ -538,16 +567,18 @@ export class Canvas2D {
         lastClip = c;
         clipInit = true;
       }
-      if (lastKind !== op.kind) {
-        lastKind = op.kind;
+      // 管线必须与 pass 的采样数匹配（WebGPU 校验），并且随合成模式变化
+      const pipeKey = `${op.kind}|${op.comp}`;
+      if (lastPipeKey !== pipeKey) {
+        lastPipeKey = pipeKey;
         if (op.kind === "flat") {
-          pass.setPipeline(flatPipeline);
+          pass.setPipeline(this.pipelineFor("flat", pass.sampleCount, op.comp));
           if (this.flatVBuf && this.flatIBuf) {
             pass.setVertexBuffer(0, this.flatVBuf);
             pass.setIndexBuffer(this.flatIBuf, "uint16");
           }
         } else {
-          pass.setPipeline(texPipeline);
+          pass.setPipeline(this.pipelineFor("tex", pass.sampleCount, op.comp));
           if (this.textVBuf && this.textIBuf) {
             pass.setVertexBuffer(0, this.textVBuf);
             pass.setIndexBuffer(this.textIBuf, "uint16");
@@ -729,7 +760,7 @@ export class Canvas2D {
     (arr === "flat" ? this.flatI : this.textI).push(a, b, c);
   }
 
-  private recordFlat(iStart: number): void {
+  private recordFlat(iStart: number, polys?: readonly Pt2[][]): void {
     if (this.flatI.length > iStart) {
       this.ops.push({
         kind: "flat",
@@ -737,8 +768,56 @@ export class Canvas2D {
         iStart,
         iEnd: this.flatI.length,
         lut: this.paint.lut,
+        comp: this.state.globalCompositeOperation,
       });
     }
+    // 需要把「形状之外」也按同一规则算掉的模式（copy / source-in / ...）：
+    // 再画一块补集（画布矩形 − 路径），用完全透明的颜色走同一个混合状态。
+    if (!polys || !blendForComposite(this.state.globalCompositeOperation)?.clearsOutside) return;
+    const devPolys = polys.map((contour) =>
+      contour.map(([x, y]) => {
+        const d = transformPoint(this.state.ctm, x, y, { x: 0, y: 0 });
+        return [d.x, d.y] as Pt2;
+      }),
+    );
+    const canvasRect: Pt2[] = [
+      [0, 0],
+      [this.viewW, 0],
+      [this.viewW, this.viewH],
+      [0, this.viewH],
+    ];
+    const tris = fillTriangles([canvasRect, ...devPolys], "evenodd");
+    if (tris.length === 0) return;
+    const savedPaint = this.paint;
+    const jStart = this.flatI.length;
+    this.paint = { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [0, 0, 0, 0] };
+    for (const tri of tris) {
+      const ids: number[] = [
+        this.pushFlatDevice(tri[0]![0], tri[0]![1]),
+        this.pushFlatDevice(tri[1]![0], tri[1]![1]),
+        this.pushFlatDevice(tri[2]![0], tri[2]![1]),
+      ];
+      this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
+    }
+    this.paint = savedPaint;
+    this.ops.push({
+      kind: "flat",
+      clip: this.state.clip ? { ...this.state.clip } : null,
+      iStart: jStart,
+      iEnd: this.flatI.length,
+      lut: null,
+      comp: this.state.globalCompositeOperation,
+    });
+  }
+
+  /** 已经是**设备空间**坐标的顶点（补集四边形用，不再走 CTM） */
+  private pushFlatDevice(x: number, y: number): number {
+    const paint = this.paint;
+    const v = this.flatV.length / 16;
+    const c = paint.vcolor;
+    const f = paint.frame;
+    this.flatV.push(x, y, c[0], c[1], c[2], c[3], x, y, paint.kind, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
+    return v;
   }
 
   // ======================================================================
@@ -766,7 +845,7 @@ export class Canvas2D {
       const ids: number[] = [this.pushFlat(tri[0]![0], tri[0]![1]), this.pushFlat(tri[1]![0], tri[1]![1]), this.pushFlat(tri[2]![0], tri[2]![1])];
       this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
     }
-    this.recordFlat(iStart);
+    this.recordFlat(iStart, polys);
   }
 
   // 便捷绘制
@@ -805,6 +884,8 @@ export class Canvas2D {
     this.paint = this.resolvePaint(this.state.strokeStyle);
     const hw = this.state.lineWidth / 2;
     const iStart = this.flatI.length;
+    const strokePolys: Pt2[][] = [];
+    for (const c of contours) if (c.points.length >= 3) strokePolys.push(c.points);
 
     const quadRaw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number) => {
       const p = (x: number, y: number) => this.pushFlat(x, y);
@@ -880,7 +961,7 @@ export class Canvas2D {
         cap(pts[n - 1]![0], pts[n - 1]![1], dLast.x, dLast.y, offLast.x, offLast.y);
       }
     }
-    this.recordFlat(iStart);
+    this.recordFlat(iStart, strokePolys);
   }
 
   private joinCorner(p0: Pt2, p1: Pt2, p2: Pt2, hw: number): void {
@@ -1033,7 +1114,7 @@ export class Canvas2D {
     this.pushTri("text", v0, v1, v2);
     this.pushTri("text", v0, v2, v3);
     if (this.textI.length > iStart) {
-      this.ops.push({ kind: "text", clip: this.state.clip ? { ...this.state.clip } : null, texture: glyph.texture, iStart, iEnd: this.textI.length });
+      this.ops.push({ kind: "text", clip: this.state.clip ? { ...this.state.clip } : null, texture: glyph.texture, iStart, iEnd: this.textI.length, comp: this.state.globalCompositeOperation });
     }
     return this;
   }
