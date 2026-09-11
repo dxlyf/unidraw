@@ -4,13 +4,13 @@
  * 布局（共 4×16 + 4×4 + 4×4 + 4 = 100 个 float = 400 字节）：
  * ```
  * u_shadowMatrix[4]   mat4 × 4     // 光源视投影矩阵
- * u_shadowParams[4]   vec4 × 4     // x=深度偏移 y=1/边长 z=类型(0 方向光/1 聚光) w=光源序号
- * u_shadowParams2[4]  vec4 × 4     // x=PCF 半径(纹素) y=法线偏移
+ * u_shadowParams[4]   vec4 × 4     // x=归一化深度偏移 y=1/边长 z=类型(0 方向光/1 聚光) w=光源序号
+ * u_shadowParams2[4]  vec4 × 4     // x=PCF 半径(纹素) y=法线偏移(世界) z=滤波方式 w=阴影强度
  * u_shadowMeta        vec4         // x=有效贴图数量
  * ```
  *
- * 着色器按「类型 + 光源序号」在方向光/聚光循环里找到对应贴图（见
- * `lights/lightingShader.ts` 的 `unidrawShadow()`）。
+ * `bias` 由调用方换算成**归一化深度**（世界单位偏移 / 阴影相机深度范围），
+ * 这样参数与场景尺度无关；WebGL2 的窗口深度只有一半范围，着色器里再乘 0.5。
  */
 
 import { std140Layout, type UniformField } from "../../gpu/std140.js";
@@ -78,13 +78,23 @@ export class ShadowState {
    * @param map 贴图（矩阵已由 `ShadowRenderer` 填好）
    * @param kind `SHADOW_KIND_DIRECTIONAL` / `SHADOW_KIND_SPOT`
    * @param lightIndex 该光源在打包灯光数组里的序号（方向光/聚光各自独立编号）
+   * @param options `bias` 是**归一化深度**（世界单位偏移 / 深度范围，由调用方换算）；
+   *                `normalBias` 是**世界单位**；`filter`/`intensity` 见 `ShadowSettings`
    * @returns 是否写入成功（超过 `MAX_SHADOW_MAPS` 返回 false）
    */
   add(
     map: ShadowMap,
     kind: number,
     lightIndex: number,
-    options: { bias: number; radius: number; normalBias: number },
+    options: {
+      bias: number;
+      radius: number;
+      normalBias: number;
+      /** 滤波方式编码：0 硬边 / 1 3x3 / 2 5x5 */
+      filter?: number;
+      /** 阴影强度 0..1 */
+      intensity?: number;
+    },
   ): boolean {
     if (this.count >= MAX_SHADOW_MAPS) return false;
     const i = this.count++;
@@ -97,6 +107,8 @@ export class ShadowState {
     const q = OFFSET.params2 + i * VEC4;
     this.data[q] = options.radius;
     this.data[q + 1] = options.normalBias;
+    this.data[q + 2] = options.filter ?? 1;
+    this.data[q + 3] = options.intensity ?? 1;
     this.maps.push(map);
     return true;
   }

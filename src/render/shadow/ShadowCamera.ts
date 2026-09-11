@@ -16,6 +16,9 @@ export class ShadowCamera {
   /** 计算得到的 viewProjection（复用对象） */
   readonly matrix = new Mat4();
 
+  private _lastNear = 0.1;
+  private _lastFar = 100;
+  private _lastTexelWorld = 0;
   private readonly _eye = new Vec3();
   private readonly _target = new Vec3();
   private readonly _right = new Vec3();
@@ -24,6 +27,21 @@ export class ShadowCamera {
   /** 最近一次拟合得到的光源位置（纹素对齐后的；调试/测试用） */
   get eye(): Readonly<Vec3> {
     return this._eye;
+  }
+
+  /** 最近一次拟合的近平面（调试/调参用；`ShadowRenderer` 用它换算 bias） */
+  get lastNear(): number {
+    return this._lastNear;
+  }
+
+  /** 最近一次拟合的远平面 */
+  get lastFar(): number {
+    return this._lastFar;
+  }
+
+  /** 最近一次拟合一个纹素覆盖的世界尺寸（仅方向光正交拟合有意义） */
+  get lastTexelWorld(): number {
+    return this._lastTexelWorld;
   }
 
   /**
@@ -104,7 +122,10 @@ export class ShadowCamera {
     // 让正交盒在深度方向也完整包住场景（同时不浪费深度范围）
     const nearPlane = near > 0 ? near : Math.max(1e-3, dist - r * 1.2);
     const farPlane = far > 0 ? far : dist + r * 1.2;
-    const projection = Mat4.ortho(-r, r, -r, r, nearPlane, Math.max(nearPlane + 1e-3, farPlane));
+    this._lastNear = nearPlane;
+    this._lastFar = Math.max(nearPlane + 1e-3, farPlane);
+    this._lastTexelWorld = texelWorld;
+    const projection = Mat4.ortho(-r, r, -r, r, nearPlane, this._lastFar);
     return Mat4.multiply(projection, view, this.matrix);
   }
 
@@ -128,6 +149,9 @@ export class ShadowCamera {
   ): Mat4 {
     const nearPlane = near > 0 ? near : 0.1;
     assert(far > nearPlane, "聚光阴影的 far 必须大于 near");
+    this._lastNear = nearPlane;
+    this._lastFar = far;
+    this._lastTexelWorld = 0;
     const len = direction.length() || 1;
     const dx = direction.x / len;
     const dy = direction.y / len;

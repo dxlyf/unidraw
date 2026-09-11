@@ -16,6 +16,7 @@ import type { Texture, TextureView } from "../../device/resources.js";
 import type { DepthStencilAttachmentOp } from "../../command/ops.js";
 import { TextureUsage } from "../../gpu/types.js";
 import { Mat4 } from "../../math/mat4.js";
+import type { ShadowSide } from "./ShadowSettings.js";
 import { assert } from "../../util/assert.js";
 
 /** 阴影贴图固定使用的深度格式（可采样、可渲染，三后端一致） */
@@ -37,6 +38,13 @@ export class ShadowMap {
   readonly matrix = new Mat4();
   /** 当前边长（像素） */
   size: number;
+  /** 最近一次拟合的深度范围（由 `ShadowRenderer` 写入；调试/调参用） */
+  nearPlane = 0;
+  farPlane = 0;
+  /** 一个纹素覆盖的世界尺寸（由 `ShadowRenderer` 写入） */
+  texelWorld = 0;
+  /** 本贴图渲染进深度图的面（由 `ShadowRenderer` 写入） */
+  viewSide: ShadowSide = "back";
   /** 深度纹理（可采样） */
   texture: Texture;
 

@@ -25,7 +25,7 @@ import { ShadowCamera } from "../render/shadow/ShadowCamera.js";
 import { ShadowDepthMaterial } from "../render/shadow/ShadowDepthMaterial.js";
 import { ShadowMap, SHADOW_DEPTH_FORMAT } from "../render/shadow/ShadowMap.js";
 import { ShadowRenderer } from "../render/shadow/ShadowRenderer.js";
-import { ShadowSettings } from "../render/shadow/ShadowSettings.js";
+import { ShadowSettings, normalizeShadowFilter, shadowFilterCode } from "../render/shadow/ShadowSettings.js";
 import {
   MAX_SHADOW_MAPS,
   SHADOW_BLOCK_BINDING,
@@ -79,7 +79,13 @@ test("ShadowSettings：默认值、clamp 与 Light.setShadow", () => {
   const s = new ShadowSettings();
   assert.equal(s.enabled, true);
   assert.equal(s.mapSize, 1024);
-  assert.ok(s.bias > 0 && s.normalBias > 0 && s.radius > 0);
+  assert.ok(s.bias > 0, "bias 缺省为正（世界单位）");
+  assert.equal(s.normalBias, 0, "normalBias 缺省 0 = 按纹素自动");
+  assert.ok(s.radius > 0);
+  assert.equal(s.filter, "pcf3", "缺省 3x3 PCF");
+  assert.equal(s.intensity, 1, "缺省阴影全强度");
+  assert.equal(s.side, "back", "缺省渲染背面（抗自阴影）");
+  assert.equal(s.stabilize, true, "缺省平滑拟合（消除闪烁）");
   assert.equal(s.near, 0, "near 缺省 0 = 自动拟合");
   assert.equal(s.far, 0);
   assert.equal(s.areaSize, 0);
@@ -87,6 +93,19 @@ test("ShadowSettings：默认值、clamp 与 Light.setShadow", () => {
   assert.equal(new ShadowSettings({ mapSize: 99999 }).mapSize, 4096, "贴图边长有上限");
   assert.equal(new ShadowSettings({ mapSize: 1 }).mapSize, 64, "贴图边长有下限");
   assert.equal(new ShadowSettings({ radius: -5 }).radius, 0, "PCF 半径不为负");
+  assert.equal(new ShadowSettings({ intensity: 5 }).intensity, 1, "强度 clamp 到 1");
+  assert.equal(new ShadowSettings({ intensity: -1 }).intensity, 0);
+  assert.equal(new ShadowSettings({ side: "double" }).side, "double");
+  assert.equal(new ShadowSettings({ side: "随便" as never }).side, "back", "未知 side 回退");
+  assert.equal(normalizeShadowFilter("pcf5"), "pcf5");
+  assert.equal(normalizeShadowFilter("不存在"), "pcf3", "未知滤波回退 pcf3");
+
+  // 面选项 → 剔除模式（阴影 pass 用反向剔除：渲染背面 = 剔除正面）
+  assert.equal(new ShadowSettings({ side: "back" }).cullModeForSide(), "front");
+  assert.equal(new ShadowSettings({ side: "front" }).cullModeForSide(), "back");
+  assert.equal(new ShadowSettings({ side: "double" }).cullModeForSide(), "none");
+  assert.equal(shadowFilterCode("hard"), 0);
+  assert.equal(shadowFilterCode("pcf5"), 2);
 
   const light = new DirectionalLight();
   assert.equal(light.castShadow, false, "默认不投影");
@@ -436,4 +455,87 @@ test("Mat4.ortho：ZO 约定（near → 0, far → 1）", () => {  const m = Mat
   assert.ok(Math.abs(z(-1) - 0) < 1e-6, "近平面 z = 0");
   assert.ok(Math.abs(z(-11) - 1) < 1e-6, "远平面 z = 1");
   assert.ok(Math.abs(z(-6) - 0.5) < 1e-6, "中点 z = 0.5");
+});
+
+test("ShadowRenderer：bias 以世界单位换算、法线偏移按纹素自动、诊断字段可读", () => {
+  const device = createMockDevice();
+  const { scene, camera } = buildScene(device, { sun: true, spot: false, boxes: 2 });
+  const sceneRenderer = new SceneRenderer();
+  const renderer = new ShadowRenderer(device, { mapSize: 512 });
+  const sun = scene.children.find((n) => n instanceof DirectionalLight) as DirectionalLight;
+  sun.shadow.bias = 0.05;         // 世界单位
+  sun.shadow.normalBias = 0;      // 自动
+  sun.shadow.filter = "pcf5";
+  sun.shadow.intensity = 0.6;
+  sun.shadow.side = "front";
+
+  const encoder = device.createCommandEncoder("fit");
+  renderer.render(encoder, scene, camera, sceneRenderer, 1 / 60);
+  device.submit([encoder.finish()]);
+
+  const map = renderer.resources.maps[0]!;
+  assert.ok(map.nearPlane > 0 && map.farPlane > map.nearPlane, "记录深度范围");
+  assert.ok(map.texelWorld > 0, "记录纹素世界尺寸");
+  assert.equal(map.viewSide, "front", "记录渲染面");
+  assert.ok(renderer.stats.texelWorld > 0 && renderer.stats.biasDepth > 0);
+
+  // 打包参数：bias 归一化深度 = 世界偏移 / 深度范围；法线偏移按 1.5 纹素自动
+  const state = renderer.resources.state;
+  const paramsOffset = 4 * 16;
+  const params2Offset = paramsOffset + 4 * MAX_SHADOW_MAPS;
+  const expectedBias = 0.05 / (map.farPlane - map.nearPlane);
+  assert.ok(Math.abs(state.data[paramsOffset]! - expectedBias) < 1e-6, "bias 已换算成归一化深度");
+  assert.ok(Math.abs(state.data[params2Offset + 1]! - map.texelWorld * 1.5) < 1e-6, "法线偏移按 1.5 纹素自动");
+  assert.equal(state.data[params2Offset + 2], shadowFilterCode("pcf5"), "滤波方式打包");
+  assert.ok(Math.abs(state.data[params2Offset + 3]! - 0.6) < 1e-6, "阴影强度打包");
+
+  // 不同 side 使用不同的深度材质（剔除模式不同）
+  const backSide = renderer.materialFor(0, "back");
+  const frontSide = renderer.materialFor(0, "front");
+  const doubleSide = renderer.materialFor(0, "double");
+  assert.notEqual(backSide, frontSide);
+  assert.notEqual(frontSide, doubleSide);
+  assert.equal(backSide.pipelineHandle.descriptor.primitive?.cullMode, "front");
+  assert.equal(frontSide.pipelineHandle.descriptor.primitive?.cullMode, "back");
+  assert.equal(doubleSide.pipelineHandle.descriptor.primitive?.cullMode, "none");
+});
+
+test("ShadowRenderer：拟合稳定（变大立刻跟随、变小平滑收敛、中心量化）", () => {
+  const device = createMockDevice();
+  const { scene, camera } = buildScene(device, { sun: true, spot: false, boxes: 2 });
+  const sceneRenderer = new SceneRenderer();
+  const renderer = new ShadowRenderer(device, { mapSize: 512, stabilizeTau: 0.3 });
+  const sun = scene.children.find((n) => n instanceof DirectionalLight) as DirectionalLight;
+  sun.shadow.stabilize = true;
+
+  const step = (): void => {
+    const encoder = device.createCommandEncoder("s");
+    renderer.render(encoder, scene, camera, sceneRenderer, 1 / 60);
+    device.submit([encoder.finish()]);
+  };
+
+  step();
+  const firstRadius = renderer.boundsRadius;
+  // 相机与场景都没变 → 拟合半径必须完全不变（否则采样网格会跳）
+  for (let i = 0; i < 10; i++) step();
+  assert.equal(renderer.boundsRadius, firstRadius, "静止场景的拟合半径不漂移");
+
+  // 加入一个远处的物体（关闭剔除，保证它进入可见集合）→ 半径立刻变大（不能漏阴影）
+  sceneRenderer.frustumCulling = false;
+  const big = new ColorMaterial(device, new Color(1, 1, 1, 1), { label: "big" });
+  const mesh = new Mesh(Geometry.create(device, box(1, 1, 1)));
+  mesh.setPosition(40, 0, 0);
+  mesh.material = big;
+  scene.add(mesh);
+  step();
+  assert.ok(renderer.boundsRadius > firstRadius, "变大立刻跟随");
+  const grown = renderer.boundsRadius;
+
+  // 移除它 → 半径平滑收敛而不是瞬间跳回（纹素尺寸量化会让它先在阶梯上停留若干帧）
+  scene.remove(mesh);
+  step();
+  assert.ok(renderer.boundsRadius <= grown, "一帧内不增大");
+  for (let i = 0; i < 240; i++) step();
+  assert.ok(renderer.boundsRadius < grown, "最终收敛下来");
+  assert.ok(renderer.boundsRadius <= firstRadius * 2.5 + 1e-3, "收敛到接近原尺寸（含一个量化阶梯的余量）");
 });

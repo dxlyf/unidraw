@@ -308,7 +308,7 @@ export class App {
 
     // 3) 渲染通道
     //    阴影贴图必须在主 pass 之前提交（WebGPU 禁止同一 submit 内既写又读同一张纹理）
-    if (this.shadows) this.shadows.renderAndSubmit(this.scene, this.camera, this.sceneRenderer);
+    if (this.shadows) this.shadows.renderAndSubmit(this.scene, this.camera, this.sceneRenderer, step);
     const pass = this.renderer.beginFrame();
     try {
       for (let i = 0; i < this.plugins.length; i++) this.plugins[i]!.beforeRender?.(this._ctx, pass);

@@ -89,9 +89,9 @@ const projectiles = new ProjectilePool(device, scene, 28);
 
 scene.add(new AmbientLight("#3c4557", 0.55));
 const sun = new DirectionalLight(new Vec3(-0.55, -1, -0.35), "#fff1cf", 1.05);
-sun.shadow.bias = 0.0016;
-sun.shadow.normalBias = 0.04;
-sun.shadow.radius = 1.4;
+sun.shadow.bias = 0.05;        // 世界单位（约 1 个阴影纹素）
+sun.shadow.normalBias = 0;     // 0 = 按纹素自动（薄片/斜面最稳）
+sun.shadow.radius = 2;
 scene.add(sun);
 function applyShadowSettings(): void {
   sun.castShadow = state.shadows;
@@ -581,7 +581,7 @@ async function renderOffscreen(): Promise<Uint8Array> {
     format: canvasFormat,
     label: "tank-selftest",
   });
-  if (state.shadows) shadowRenderer.renderAndSubmit(scene, camera, sceneRenderer);
+  if (state.shadows) shadowRenderer.renderAndSubmit(scene, camera, sceneRenderer, 1 / 60);
   else shadowRenderer.clear();
   const encoder = device.createCommandEncoder("tank-selftest");
   const pass = encoder.beginRenderPass({
@@ -733,7 +733,8 @@ function frame(): void {
   }
 
   // 阴影 pass 必须独立提交（WebGPU 不允许同一 submit 内既写又读同一张纹理）
-  if (state.shadows) shadowRenderer.renderAndSubmit(scene, camera, sceneRenderer);
+  // 传入 dt：拟合会按时间常数平滑，避免阴影采样网格随相机移动逐帧跳动（闪烁）
+  if (state.shadows) shadowRenderer.renderAndSubmit(scene, camera, sceneRenderer, frozen ? 1 / 60 : rawDt);
   else shadowRenderer.clear();
 
   if (state.postfx) {

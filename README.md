@@ -18,7 +18,7 @@
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
 | 混合模式 | `MaterialOptions.blend` 自定义混合状态（src/dst factor + operation，与 WebGPU `GPUBlendComponent` 一一对应）、`BLEND_PRESETS` 常用预设、`depthWrite` 开关；带 `blend`/`alphaBlend` 的材质自动标记为半透明，`SceneRenderer` 把它们排在不透明物体之后并按距离**远→近**绘制 |
 | 灯光 | `AmbientLight` / `DirectionalLight`(平行光) / `PointLight` / `SpotLight`（锥角+半影），灯是场景图节点、可动画驱动；每帧自动收集打包进 `LightsBlock`（方向 4 / 点 8 / 聚 4，无灯时使用与历史等价的默认光） |
-| 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 纹素对齐）/ 聚光（透视）各一张深度贴图，3×3 PCF 软阴影；`mapSize`/`bias`/`normalBias`/`radius` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
+| 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 稳定化） / 聚光（透视）各一张深度贴图，PCF 软阴影（`filter` hard / 3×3 / 5×5）；`mapSize`/`bias`(世界单位)/`normalBias`(自动)/`radius`/`filter`/`intensity`/`side`/`stabilize` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
 | 实例化 | `InstancedMesh`：同一几何体 + 材质一次 draw 画 N 个实例（实例矩阵走 `stepMode: "instance"` 顶点流），自带脏区间上传、联合包围球剔除、阴影/拾取支持；与「N 个独立 Mesh」逐像素一致（示例自检 meanDiff = 0） |
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule**；闭合几何保证**无边界边（没有洞）/无零面积三角形/无非流形边**，体积与解析值一致（单测守护） |
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
@@ -321,7 +321,7 @@ composer.render((pass) => sceneRenderer.render(pass, scene, camera));
 import { DirectionalLight, ShadowRenderer, Vec3 } from "unidraw";
 
 const sun = new DirectionalLight(new Vec3(-0.5, -1, -0.4), "#fff3d6", 1.0);
-sun.castShadow = true;        // 打开阴影；sun.shadow.mapSize / bias / radius 可调
+sun.castShadow = true;        // 打开阴影；sun.shadow.mapSize / bias / radius / filter 可调
 scene.add(sun);
 
 const shadows = new ShadowRenderer(device);
@@ -332,11 +332,14 @@ renderer.endFrame();
 // 用 App 时更省事：App.create(canvas, { shadows: true })
 ```
 
-- 方向光用**正交自动拟合**（可见物体包围球 + 纹素对齐），聚光用透视拟合（视场角 = 外锥角）；
+- 方向光用**正交自动拟合**（可见物体包围球 + 纹素对齐），`stabilize`（默认开）做
+  半径平滑 + 纹素尺寸 1-2-5 阶梯量化 + 中心对齐，消除相机微动时的阴影闪烁；
+  要绝对稳定可固定 `areaSize`；聚光用透视拟合（视场角 = 外锥角）；
 - 阴影贴图是 `depth32float` 深度纹理，着色器用 `texelFetch`/`textureLoad` 手动比较
-  + 3×3 PCF —— 不需要比较采样器/扩展，两个后端结果一致；
+  + PCF（`filter` hard / 3×3 / 5×5）—— 不需要比较采样器/扩展，两个后端结果一致；
 - 一次着色最多 4 张（`MAX_SHADOW_MAPS`），超出的投影灯计入 `shadows.stats.skipped`；
-- 示例 `examples/shadows` 自带 `SHADOW_SELFTEST`（阴影比例、阴影是否随光移动、整体曝光不变）。
+- 示例 `examples/shadows` 自带 `SHADOW_SELFTEST`（阴影比例、阴影随光移动、acne 条纹、
+  相机微动时阴影图抖动）。
 
 详见 [docs/shadows.md](docs/shadows.md)。
 
