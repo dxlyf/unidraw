@@ -60,8 +60,19 @@ float unidrawGradientT() {
 void main() {
   // 注意：采样必须写在**统一控制流**里（WGSL 禁止在非一致分支里 textureSample），
   // 所以这里不做 early-return，而是先无条件采样、再按 kind 选择。
+  // kind 3 = 图案：uv = (用户空间坐标 − 原点) / 图案尺寸，重复方式交给采样器寻址。
+  vec2 patternUv = (v_upos - v_gradA.yz) / max(vec2(1e-6), vec2(v_gradA.w, v_gradB.x));
   vec4 grad = texture(u_paintTex, vec2(unidrawGradientT(), 0.5));
+  vec4 pat = texture(u_paintTex, patternUv);
   vec4 gradientColor = vec4(grad.rgb, grad.a * v_color.a);
+  // v_gradB.w = 重复轴位标记：未重复的轴在 [0,1] 之外应当透明（原生语义）
+  float repX = mod(v_gradB.w, 2.0);
+  float repY = floor(v_gradB.w / 2.0);
+  float inside = 1.0;
+  if (repX < 0.5) inside *= step(0.0, patternUv.x) * step(patternUv.x, 1.0);
+  if (repY < 0.5) inside *= step(0.0, patternUv.y) * step(patternUv.y, 1.0);
+  vec4 patternColor = vec4(pat.rgb, pat.a * inside * v_color.a);
+  if (v_gradA.x > 2.5) { fragColor = patternColor; return; }
   fragColor = v_gradA.x < 0.5 ? v_color : gradientColor;
 }
 `;
@@ -111,9 +122,18 @@ struct FSIn {
   let linearT = select(0.0, dot(in.v_upos - p0, d) / dd, dd > 1e-12);
   let radialT = length(in.v_upos - in.v_gradB.yz) / max(1e-6, in.v_gradB.w);
   let t = select(radialT, linearT, in.v_gradA.x < 1.5);
+  let patternUv = (in.v_upos - in.v_gradA.yz) / max(vec2f(1e-6), vec2f(in.v_gradA.w, in.v_gradB.x));
+  let repX = in.v_gradB.w - floor(in.v_gradB.w / 2.0) * 2.0;
+  let repY = floor(in.v_gradB.w / 2.0);
+  var inside = 1.0;
+  if (repX < 0.5) { inside = inside * step(0.0, patternUv.x) * step(patternUv.x, 1.0); }
+  if (repY < 0.5) { inside = inside * step(0.0, patternUv.y) * step(patternUv.y, 1.0); }
   let c = textureSample(u_lut, u_lutSampler, vec2f(t, 0.5));
+  let p = textureSample(u_lut, u_lutSampler, patternUv);
   let gradientColor = vec4f(c.rgb, c.a * in.v_color.a);
-  return select(gradientColor, in.v_color, in.v_gradA.x < 0.5);
+  let patternColor = vec4f(p.rgb, p.a * inside * in.v_color.a);
+  let painted = select(gradientColor, in.v_color, in.v_gradA.x < 0.5);
+  return select(painted, patternColor, in.v_gradA.x > 2.5);
 }
 `;
 

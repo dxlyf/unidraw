@@ -32,6 +32,8 @@ export interface Op {
   comp: string;
   /** 渐变 LUT 纹理（纯色为 null → 绑 1x1 白纹理，着色器直接走顶点色） */
   lut?: Texture | null;
+  /** 图案采样器（图案填充时与 LUT 纹理配对，决定重复方式） */
+  sampler?: import("../device/resources.js").Sampler;
   /** 文字图集纹理（kind === "text"） */
   texture?: Texture;
 }

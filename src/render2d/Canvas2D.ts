@@ -12,6 +12,7 @@ import { sampleStyle } from "./style.js";
 import { hexColor, type GradientStop } from "./color.js";
 import { LinearGradient } from "./LinearGradient.js";
 import { RadialGradient } from "./RadialGradient.js";
+import { CanvasPattern, type PatternRepetition } from "./pattern.js";
 import { Path2D } from "./path.js";
 import { fillTriangles, type FillRule } from "./fill.js";
 import type { Contour } from "./pathTypes.js";
@@ -41,6 +42,8 @@ interface ResolvedPaint {
   kind: number;
   frame: [number, number, number, number, number, number, number];
   lut: Texture | null;
+  /** 图案专用采样器（重复方式不同）；缺省用普通采样器 */
+  sampler?: Sampler;
   /** 顶点色（渐变时是 (1,1,1,globalAlpha)，颜色交给 LUT） */
   vcolor: [number, number, number, number];
 }
@@ -80,7 +83,7 @@ export class Canvas2D {
   private readonly flatPipelines = new Map<string, RenderPipeline>();
   private readonly texPipelines = new Map<string, RenderPipeline>();
   private sampler!: Sampler;
-  private readonly textureGroups = new WeakMap<Texture, BindGroup>();
+  private readonly textureGroups = new WeakMap<Texture, Map<Sampler, BindGroup>>();
   private pipelineFormat: string | null = null;
   /** 纯色绘制绑定的 1×1 白 LUT（着色器直接走顶点色，不采样渐变） */
   private solidLut!: Texture;
@@ -92,6 +95,8 @@ export class Canvas2D {
   private readonly warnedComposite = new Set<string>();
   /** 图像源 → 纹理缓存（同一个 img/canvas 反复绘制只上传一次） */
   private readonly imageTextures = new WeakMap<object, Texture>();
+  /** 图案采样器（按重复方式缓存） */
+  private readonly patternSamplers = new Map<PatternRepetition, Sampler>();
 
   private viewW = 1;
   private viewH = 1;
@@ -299,8 +304,49 @@ export class Canvas2D {
         vcolor: [1, 1, 1, alpha],
       };
     }
+    if (style instanceof CanvasPattern) {
+      // 图案：uv = 用户空间坐标 / 图案尺寸（kind 3），重复方式交给采样器寻址；
+      // frame[6] 复用为「哪些轴重复」位标记（1=U, 2=V）。原生 no-repeat / repeat-x
+      // 在**未平铺**的方向上是不画的（透明），而 CLAMP_TO_EDGE 会把边缘像素拉出去，
+      // 所以着色器要据此把非重复轴的 [0,1] 之外裁掉。
+      const repFlag =
+        (style.repetition === "repeat" || style.repetition === "repeat-x" ? 1 : 0) +
+        (style.repetition === "repeat" || style.repetition === "repeat-y" ? 2 : 0);
+      return {
+        kind: 3,
+        frame: [0, 0, style.width, style.height, 0, 0, repFlag],
+        lut: style.texture,
+        sampler: style.sampler,
+        vcolor: [1, 1, 1, alpha],
+      };
+    }
     const c = typeof style === "string" ? hexColor(style) : (style as Color);
     return { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [c.r, c.g, c.b, c.a * alpha] };
+  }
+
+  /**
+   * 创建图案（`createPattern`）：把图像当 `fillStyle` / `strokeStyle` 使用。
+   *
+   * `repetition`：`"repeat"` / `"repeat-x"` / `"repeat-y"` / `"no-repeat"`；
+   * 图案锚定在**用户坐标系原点**（与原生一致），并且随 CTM 一起变换。
+   */
+  createPattern(source: CanvasImageSourceLike, repetition: PatternRepetition = "repeat"): CanvasPattern {
+    const size = sourceSize(source);
+    const rep: PatternRepetition =
+      repetition === "repeat-x" || repetition === "repeat-y" || repetition === "no-repeat" ? repetition : "repeat";
+    let sampler = this.patternSamplers.get(rep);
+    if (!sampler) {
+      sampler = this.device.createSampler({
+        label: `2d-pattern-${rep}`,
+        addressModeU: rep === "repeat" || rep === "repeat-x" ? "repeat" : "clamp-to-edge",
+        addressModeV: rep === "repeat" || rep === "repeat-y" ? "repeat" : "clamp-to-edge",
+        magFilter: "linear",
+        minFilter: "linear",
+        mips: false,
+      });
+      this.patternSamplers.set(rep, sampler);
+    }
+    return new CanvasPattern(source, rep, this.textureFor(source), sampler, size.width, size.height);
   }
 
   // ======================================================================
@@ -559,6 +605,7 @@ export class Canvas2D {
     let clipInit = false;
     /** 当前绑定在 binding 1 的纹理（渐变 LUT / 字形图集） */
     let lastTex: Texture | null = null;
+    let lastSampler: Sampler | null = null;
     /** 当前管线（kind + 合成模式 + 采样数 的组合） */
     let lastPipeKey: string | null = null;
 
@@ -590,9 +637,11 @@ export class Canvas2D {
       }
       // 纹理绑定逐 op 变化（每个渐变一张 LUT、每个字符串一张字形图集）
       const wantTex = (op.kind === "flat" ? (op.lut ?? this.solidLut) : op.texture) as Texture;
-      if (lastTex !== wantTex) {
-        pass.setBindGroup(0, this.textureGroup(wantTex));
+      const wantSampler = (op.kind === "flat" ? op.sampler : undefined) ?? this.sampler;
+      if (lastTex !== wantTex || lastSampler !== wantSampler) {
+        pass.setBindGroup(0, this.textureGroup(wantTex, wantSampler));
         lastTex = wantTex;
+        lastSampler = wantSampler;
       }
       const n = op.iEnd - op.iStart;
       if (n > 0) pass.drawIndexed(n, 1, op.iStart, 0, 0);
@@ -634,19 +683,24 @@ export class Canvas2D {
     }
   }
 
-  /** 按纹理缓存 bind group（渐变 LUT 与字形图集共用同一份布局） */
-  private textureGroup(texture: Texture): BindGroup {
-    let g = this.textureGroups.get(texture);
+  /** 按（纹理 + 采样器）缓存 bind group（渐变 LUT / 字形图集 / 图案共用同一份布局） */
+  private textureGroup(texture: Texture, sampler: Sampler = this.sampler): BindGroup {
+    let bySampler = this.textureGroups.get(texture);
+    if (!bySampler) {
+      bySampler = new Map<Sampler, BindGroup>();
+      this.textureGroups.set(texture, bySampler);
+    }
+    let g = bySampler.get(sampler);
     if (!g) {
       g = this.device.createBindGroup({
         layout: this.texLayout,
         entries: [
           { binding: 0, resource: this.viewBlock.buffer },
           { binding: 1, resource: texture.view() },
-          { binding: 2, resource: this.sampler },
+          { binding: 2, resource: sampler },
         ],
       });
-      this.textureGroups.set(texture, g);
+      bySampler.set(sampler, g);
     }
     return g;
   }
@@ -771,6 +825,7 @@ export class Canvas2D {
         iStart,
         iEnd: this.flatI.length,
         lut: this.paint.lut,
+        sampler: this.paint.sampler,
         comp: this.state.globalCompositeOperation,
       });
     }

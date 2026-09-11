@@ -2,9 +2,11 @@ import { Color } from "../math/color.js";
 import type { GradientStop, RGBA } from "./color.js";
 import { LinearGradient } from "./LinearGradient.js";
 import { RadialGradient } from "./RadialGradient.js";
+import { CanvasPattern } from "./pattern.js";
 import { hexColor } from "./color.js";
 
-export type PaintStyle = string | Color | LinearGradient | RadialGradient;
+export type PaintStyle = string | Color | LinearGradient | RadialGradient | CanvasPattern;
+export { CanvasPattern };
 
 export function sampleStops(stops: GradientStop[], t: number): RGBA {
   if (stops.length === 0) return { r: 0, g: 0, b: 0, a: 1 };
@@ -43,7 +45,10 @@ export function sampleStyle(style: PaintStyle, x: number, y: number): RGBA {
     const t = len2 > 1e-12 ? ((x - style.x0) * dx + (y - style.y0) * dy) / len2 : 0;
     return sampleStops(style.stops, t);
   }
-  // radial（近似：在三角化顶点采样，配合细分可获得平滑结果）
-  const dist = Math.hypot(x - style.cx, y - style.cy) / style.r;
-  return sampleStops(style.stops, dist);
+  // 图案：逐顶点采样没有意义（真实采样在片元里按用户空间 uv 做），
+  // 这里只用于「文字图集」等按顶点着色的回退路径 —— 取白色。
+  if (style instanceof CanvasPattern) return { r: 1, g: 1, b: 1, a: 1 };
+  // radial
+  const dist = Math.hypot(x - (style as RadialGradient).cx, y - (style as RadialGradient).cy) / (style as RadialGradient).r;
+  return sampleStops((style as RadialGradient).stops, dist);
 }

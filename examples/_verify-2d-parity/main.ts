@@ -59,6 +59,7 @@ interface SceneCtx {
   textBaseline: string;
   globalCompositeOperation: string;
   drawImage(source: unknown, ...args: number[]): void;
+  createPattern?(source: unknown, repetition: string): unknown;
   save(): void;
   restore(): void;
   translate(x: number, y: number): void;
@@ -268,6 +269,56 @@ function drawTextDash(c: SceneCtx): void {
   c.lineTo(456, 264);
   c.stroke();
   void w;
+}
+
+/** 图案填充场景：repeat / repeat-x / repeat-y / no-repeat + 图案描边 + 图案文字 */
+const PATTERN_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "repeat", x: 12, y: 12, w: 148, h: 148 },
+  { name: "repeat-x", x: 170, y: 12, w: 148, h: 148 },
+  { name: "repeat-y", x: 328, y: 12, w: 144, h: 148 },
+  { name: "no-repeat", x: 12, y: 174, w: 148, h: 84 },
+  { name: "图案描边", x: 170, y: 174, w: 148, h: 84 },
+  { name: "图案文字", x: 328, y: 174, w: 144, h: 84 },
+];
+
+function drawPatterns(c: SceneCtx): void {
+  const img = makeSourceImage();
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  const cases: [string, number, number, number, number][] = [
+    ["repeat", 24, 24, 124, 124],
+    ["repeat-x", 182, 24, 124, 124],
+    ["repeat-y", 340, 24, 120, 124],
+    ["no-repeat", 24, 186, 124, 60],
+  ];
+  for (const [rep, x, y, w, h] of cases) {
+    const p = c.createPattern?.(img, rep);
+    if (!p) continue;
+    c.fillStyle = p;
+    c.beginPath();
+    c.roundRect(x, y, w, h, 14);
+    c.fill();
+    c.fillStyle = "#8b93a7";
+    c.font = `600 10px ${FONT}`;
+    c.fillText(rep, x, y + h + 12);
+  }
+
+  const ps = c.createPattern?.(img, "repeat");
+  if (ps) {
+    c.strokeStyle = ps;
+    c.lineWidth = 12;
+    c.beginPath();
+    c.roundRect(182, 186, 124, 60, 20);
+    c.stroke();
+  }
+
+  const pt = c.createPattern?.(img, "repeat");
+  if (pt) {
+    c.fillStyle = pt;
+    c.font = `700 26px ${FONT}`;
+    c.fillText("Pattern", 340, 220);
+  }
 }
 
 /** drawImage 场景：源图由离屏 2D 画布程序化生成（不依赖外部资源） */
@@ -546,6 +597,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   extras: { label: "虚线/文字API", draw: (c) => drawTextDash(c), regions: EXTRAS_REGIONS },
   composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
+  pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
 };
 const sceneId = params.get("scene") ?? "parity";
 const scene = SCENES[sceneId] ?? SCENES.parity!;
