@@ -5,6 +5,7 @@ import { triangulateSimplePolygon, polygonArea2 } from "../render2d/triangulate.
 import { transformPoint, identityAffine, multiplyAffine, type Affine } from "../render2d/matrix.js";
 import { Color } from "../math/color.js";
 import { LinearGradient, sampleStyle } from "../render2d/style.js";
+import { fillTriangles } from "../render2d/fill.js";
 
 function ptsClose(p: readonly [number, number], q: readonly [number, number], eps = 1e-6): boolean {
   return Math.abs(p[0] - q[0]) < eps && Math.abs(p[1] - q[1]) < eps;
@@ -133,4 +134,70 @@ test("style: 纯色与线性渐变端点采样", () => {
   const c1b = sampleStyle(grad, 10, 0);
   const cm = sampleStyle(grad, 5, 0);
   assert.ok(c0.r < 0.05 && c1b.r > 0.95 && Math.abs(cm.r - 0.5) < 0.1);
+});
+
+// ---------------------------------------------------------------------------
+// 多子路径填充规则（nonzero / evenodd）
+// ---------------------------------------------------------------------------
+
+/** 三角形集合的总面积（三角形互不重叠，直接求和即可） */
+function trianglesArea(tris: readonly (readonly (readonly [number, number])[])[]): number {
+  let a = 0;
+  for (const t of tris) {
+    const [p0, p1, p2] = t as readonly [readonly [number, number], readonly [number, number], readonly [number, number]];
+    a += Math.abs((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])) / 2;
+  }
+  return a;
+}
+
+const rectContour = (x: number, y: number, w: number, h: number, ccw = false): [number, number][] =>
+  ccw
+    ? [
+        [x, y],
+        [x, y + h],
+        [x + w, y + h],
+        [x + w, y],
+      ]
+    : [
+        [x, y],
+        [x + w, y],
+        [x + w, y + h],
+        [x, y + h],
+      ];
+
+test("fill：重叠子路径按 nonzero 取并集（半透明不会覆盖两次）", () => {
+  const tris = fillTriangles([rectContour(0, 0, 10, 10), rectContour(5, 5, 10, 10)], "nonzero");
+  // 并集面积 = 100 + 100 − 25（重叠的 5×5）
+  assert.ok(Math.abs(trianglesArea(tris) - 175) < 1e-6, `并集面积应为 175，实际 ${trianglesArea(tris)}`);
+});
+
+test("fill：evenodd 内环挖洞，nonzero 只有反向绕序才挖洞", () => {
+  const outer = rectContour(0, 0, 10, 10);
+  const innerCw = rectContour(2, 2, 5, 5);
+  const innerCcw = rectContour(2, 2, 5, 5, true);
+  const even = fillTriangles([outer, innerCw], "evenodd");
+  assert.ok(Math.abs(trianglesArea(even) - 75) < 1e-6, `evenodd 面积应为 100−25=75，实际 ${trianglesArea(even)}`);
+  const nonzeroHole = fillTriangles([outer, innerCcw], "nonzero");
+  assert.ok(Math.abs(trianglesArea(nonzeroHole) - 75) < 1e-6, `nonzero 反向内环应为 75，实际 ${trianglesArea(nonzeroHole)}`);
+  // 同向内环在 nonzero 下绕数为 2 → 仍然是实心
+  const nonzeroSolid = fillTriangles([outer, innerCw], "nonzero");
+  assert.ok(Math.abs(trianglesArea(nonzeroSolid) - 100) < 1e-6, `nonzero 同向内环应为实心 100，实际 ${trianglesArea(nonzeroSolid)}`);
+});
+
+test("fill：自相交五角星 nonzero 填中心、evenodd 留五边形空洞", () => {
+  const star: [number, number][] = [];
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i * 4 * Math.PI) / 5;
+    star.push([100 + Math.cos(a) * 40, 100 + Math.sin(a) * 40]);
+  }
+  const nonzero = trianglesArea(fillTriangles([star], "nonzero"));
+  const evenodd = trianglesArea(fillTriangles([star], "evenodd"));
+  assert.ok(nonzero > evenodd + 100, `nonzero 应明显大于 evenodd（${nonzero} vs ${evenodd}）`);
+  // 解析值（R=40 的五角星）：
+  //   5 个角三角形 ≈ 5 × 248.25 = 1241.25
+  //   中心五边形（内接圆半径 r = R(2−φ) ≈ 15.279）≈ 555.03
+  //   → nonzero = 两者之和 ≈ 1796.3；evenodd 只算角，中心是空洞 ≈ 1241.2
+  assert.ok(Math.abs(nonzero - 1796.3) < 2, `nonzero 面积约 1796.3，实际 ${nonzero}`);
+  assert.ok(Math.abs(evenodd - 1241.2) < 2, `evenodd 面积约 1241.2（中心为空洞），实际 ${evenodd}`);
+  assert.ok(Math.abs(nonzero - evenodd - 555.0) < 2, `两者之差应等于中心五边形面积 555，实际 ${nonzero - evenodd}`);
 });

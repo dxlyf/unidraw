@@ -51,9 +51,16 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 - 曲线按容差**自适应细分**（`flatten(tolerance)`）
 
 ### 填充与描边
-- `fill()`：单轮廓填充，凸多边形扇形、凹多边形耳切；多个子路径各自填充
+- `fill(rule?)`：`rule` 为 `"nonzero"`（默认，与原生一致）或 `"evenodd"`。
+  多子路径会**按规则求出精确的填充区域**再拆成互不重叠的三角形：
+  内环挖洞、重叠子路径只覆盖一次（半透明不会出现深色缝）、自相交路径（一笔画五角星）
+  也正确；
+  - 单轮廓且不自相交时走耳切法（三角形最少）；
+  - 其余情况走**扫描线梯形分解**：事件 y = 顶点 y + 所有边交点 y，带内按 x 排序后
+    用填充规则配对成内部区间，每段插值成梯形。边数超过 1024 会退回逐轮廓耳切
+    （避免病态输入 O(n²) 爆炸）；
 - `stroke()`：线宽 / `lineCap`(butt/round/square) / `lineJoin`(miter/round/bevel)
-  / `miterLimit`
+  / `miterLimit`（同一路径的线段/接头仍是**各自覆盖**，半透明描边在接头处会比原生略深）
 - 便捷：`fillRect/strokeRect/fillCircle/strokeCircle`
 
 ### 样式
@@ -100,7 +107,8 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 
 ## 已知边界（v0.1）
 - 裁剪仅限轴对齐矩形；路径级/任意形状裁剪未实现；
-- 多子路径填充为“各自填充”（不叠加组合为非零/奇偶规则）；
+- `stroke()` 的线段/接头是各自覆盖（**不支持**把整条描边当作一个区域只覆盖一次），
+  半透明粗描边在接头处会比原生略深；
 - 圆角 join 用扇形逼近；
 - 字形纹理在 DPR>1 时以设备像素栅格化（缩小绘制可能略糊，可后续按 DPR 缓存）；
 - 尚未支持：`lineDash`、`shadowBlur`、`drawImage`/`createPattern`、
@@ -122,6 +130,9 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 | 星形（凹多边形） | 0.78 | |
 | 粗贝塞尔描边 / 文字 | 0.50 ~ 0.57 | |
 | 1.2px 细线 | 1.31 | 亚像素栅格化差异，两端都会略有不同 |
+
+另有 `?scene=fillrules` 场景专门验证多子路径填充规则（重叠并集 / evenodd 挖洞 /
+nonzero 反向挖洞 / 自相交五角星），整幅平均差 ≈ 0.10，各分区 ≤ 0.32。
 
 继续排查时应先看这张表：哪个区域掉下去，就说明对应图元的求值/栅格化方式跑偏了。
 

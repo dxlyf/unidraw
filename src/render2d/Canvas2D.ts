@@ -13,7 +13,7 @@ import { hexColor, type GradientStop } from "./color.js";
 import { LinearGradient } from "./LinearGradient.js";
 import { RadialGradient } from "./RadialGradient.js";
 import { Path2D } from "./path.js";
-import { triangulateSimplePolygon } from "./triangulate.js";
+import { fillTriangles, type FillRule } from "./fill.js";
 import type { Pt2 } from "./matrix.js";
 import { identityAffine, copyAffine, multiplyAffine, transformPoint } from "./matrix.js";
 import { FLAT_FS_GLSL, FLAT_VS_GLSL, FLAT_WGSL, TEX_FS_GLSL, TEX_VS_GLSL, TEX_WGSL } from "./shaders.js";
@@ -631,22 +631,26 @@ export class Canvas2D {
   // 填充
   // ======================================================================
 
-  fill(): void {
+  /**
+   * 填充当前路径。
+   *
+   * @param rule 填充规则（默认 `"nonzero"`，与原生一致）：多子路径按规则求**精确**
+   *   填充区域 —— 内环挖洞、重叠子路径只覆盖一次（半透明不会出现深色缝）、
+   *   自相交路径也正确。
+   */
+  fill(rule: FillRule = "nonzero"): void {
     const contours = this.path.flatten(0.2);
     if (contours.length === 0) return;
+    const polys: Pt2[][] = [];
+    for (const contour of contours) {
+      if (contour.points.length >= 3) polys.push(contour.points);
+    }
+    if (polys.length === 0) return;
     this.paint = this.resolvePaint(this.state.fillStyle);
     const iStart = this.flatI.length;
-    for (const contour of contours) {
-      const pts = contour.points;
-      if (pts.length < 3) continue;
-      const tris = triangulateSimplePolygon(pts);
-      if (!tris) continue;
-      const ids: number[] = [];
-      for (const k of tris) {
-        const p = pts[k]!;
-        ids.push(this.pushFlat(p[0], p[1]));
-      }
-      for (let i = 0; i < ids.length; i += 3) this.pushTri("flat", ids[i]!, ids[i + 1]!, ids[i + 2]!);
+    for (const tri of fillTriangles(polys, rule)) {
+      const ids: number[] = [this.pushFlat(tri[0]![0], tri[0]![1]), this.pushFlat(tri[1]![0], tri[1]![1]), this.pushFlat(tri[2]![0], tri[2]![1])];
+      this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
     }
     this.recordFlat(iStart);
   }

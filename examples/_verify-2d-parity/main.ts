@@ -46,7 +46,8 @@ interface SceneCtx {
   rect(x: number, y: number, w: number, h: number): void;
   roundRect(x: number, y: number, w: number, h: number, r: number | number[]): void;
   closePath(): void;
-  fill(): void;
+  /** 填充规则（`nonzero` / `evenodd`） */
+  fill(rule?: string): void;
   stroke(): void;
   fillRect(x: number, y: number, w: number, h: number): void;
   fillText(text: string, x: number, y: number): void;
@@ -79,6 +80,88 @@ const REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = 
   { name: "文字", x: 18, y: 104, w: 240, h: 44 },
   { name: "圆/椭圆", x: 258, y: 148, w: 190, h: 84 },
 ];
+
+/**
+ * 填充规则场景：专门验证「多子路径 / 自相交路径」的填充区域。
+ *
+ * - 重叠子路径（同一条路径里两个相交矩形）→ 只覆盖一次，半透明不该有深色缝；
+ * - 内环挖洞（evenodd / 反向绕序的 nonzero）→ 中间要是空的；
+ * - 一笔画五角星（自相交）→ nonzero 中心实心、evenodd 中心是五边形空洞。
+ */
+const FILL_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "重叠子路径", x: 12, y: 12, w: 148, h: 148 },
+  { name: "evenodd 挖洞", x: 170, y: 12, w: 148, h: 148 },
+  { name: "nonzero 挖洞", x: 328, y: 12, w: 144, h: 148 },
+  { name: "五星 nonzero", x: 12, y: 166, w: 148, h: 96 },
+  { name: "五星 evenodd", x: 170, y: 166, w: 148, h: 96 },
+  { name: "多轮廓自交", x: 328, y: 166, w: 144, h: 96 },
+];
+
+/** 五角星：一笔画的**自相交**路径（5 个顶点按隔点相连） */
+function starPath(c: SceneCtx, cx: number, cy: number, r: number): void {
+  c.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i * 4 * Math.PI) / 5;
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r;
+    if (i === 0) c.moveTo(x, y);
+    else c.lineTo(x, y);
+  }
+  c.closePath();
+}
+
+function drawFillRules(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  // 1) 一条路径里两个重叠矩形（半透明）：应当只覆盖一次
+  c.globalAlpha = 0.55;
+  c.fillStyle = "#35d7ee";
+  c.beginPath();
+  c.rect(24, 24, 88, 88);
+  c.rect(64, 64, 88, 88);
+  c.fill();
+  c.globalAlpha = 1;
+
+  // 2) evenodd 挖洞：外框 + 内框（同向）
+  c.fillStyle = "#f5d02e";
+  c.beginPath();
+  c.rect(186, 24, 116, 116);
+  c.rect(214, 52, 60, 60);
+  c.fill("evenodd");
+
+  // 3) nonzero 挖洞：内框反向绕序
+  c.fillStyle = "#ff9a3d";
+  c.beginPath();
+  c.rect(344, 24, 112, 112);
+  c.moveTo(370, 50);
+  c.lineTo(370, 110);
+  c.lineTo(430, 110);
+  c.lineTo(430, 50);
+  c.closePath();
+  c.fill();
+
+  // 4) 五星：nonzero（中心实心）
+  c.fillStyle = "#ff5c7a";
+  starPath(c, 76, 216, 44);
+  c.fill();
+
+  // 5) 五星：evenodd（中心留五边形空洞）
+  c.fillStyle = "#5aa0ff";
+  starPath(c, 234, 216, 44);
+  c.fill("evenodd");
+
+  // 6) 多个子路径自相交（两个重叠矩形 + 一个三角），nonzero
+  c.fillStyle = "#3dd68c";
+  c.beginPath();
+  c.rect(352, 176, 72, 72);
+  c.rect(384, 200, 64, 60);
+  c.moveTo(352, 260);
+  c.lineTo(400, 168);
+  c.lineTo(444, 260);
+  c.closePath();
+  c.fill();
+}
 
 function drawScene(c: SceneCtx, g: GradientFactory): void {
   // 背景：竖向线性渐变（整幅不透明，两侧都从透明画到不透明）
@@ -224,6 +307,15 @@ interface Region {
   over48: number;
 }
 
+/** 场景：`?scene=parity`（默认，全能力） / `?scene=fillrules`（多子路径填充规则） */
+const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFactory) => void; regions: typeof REGIONS }> = {
+  parity: { label: "全能力", draw: drawScene, regions: REGIONS },
+  fillrules: { label: "填充规则", draw: (c) => drawFillRules(c), regions: FILL_REGIONS },
+};
+const sceneId = params.get("scene") ?? "parity";
+const scene = SCENES[sceneId] ?? SCENES.parity!;
+const activeRegions = scene.regions;
+
 function compare(a: Uint8ClampedArray | Uint8Array, b: Uint8ClampedArray | Uint8Array): { overall: Region; regions: Region[] } {
   const region = (x0: number, y0: number, w: number, h: number): { mean: number; over16: number; over48: number } => {
     let sum = 0;
@@ -246,7 +338,7 @@ function compare(a: Uint8ClampedArray | Uint8Array, b: Uint8ClampedArray | Uint8
   const all = region(0, 0, W, H);
   return {
     overall: { name: "整幅", ...all },
-    regions: REGIONS.map((r) => ({ name: r.name, ...region(r.x, r.y, r.w, r.h) })),
+    regions: activeRegions.map((r) => ({ name: r.name, ...region(r.x, r.y, r.w, r.h) })),
   };
 }
 
@@ -293,7 +385,7 @@ async function main(): Promise<void> {
   nativeCanvas.style.cssText = "display:block;width:480px;height:270px";
   const nctx = nativeCanvas.getContext("2d", { willReadFrequently: true })!;
   nctx.clearRect(0, 0, W, H);
-  drawScene(nctx as unknown as SceneCtx, nativeFactory(nctx));
+  scene.draw(nctx as unknown as SceneCtx, nativeFactory(nctx));
   const nativeData = nctx.getImageData(0, 0, W, H).data;
   nativeSlot.appendChild(nativeCanvas);
 
@@ -319,7 +411,7 @@ async function main(): Promise<void> {
   });
   c2d.setViewportSize(W, H);
   c2d.begin();
-  drawScene(c2d as unknown as SceneCtx, oursFactory());
+  scene.draw(c2d as unknown as SceneCtx, oursFactory());
   c2d.flush(pass, Mat4.ortho(0, W, H, 0, -1, 1));
   pass.end();
   device.submit([encoder.finish()]);
