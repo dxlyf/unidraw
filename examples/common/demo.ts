@@ -1,6 +1,9 @@
 /**
  * 示例公共引导：全屏 canvas + Renderer + 轨道相机 + FPS + 后端切换。
  * 用 URL 参数选择后端：?backend=webgpu | webgl2 | auto
+ *
+ * 无头回归用开关：`?hud=0` 隐藏左上角 HUD 与右下角提示文字
+ * （两个后端的设备名长度不同，HUD 换行行数也不同，会污染逐像素对比）。
  */
 
 import { Renderer } from "../../src/render/Renderer.js";
@@ -126,6 +129,12 @@ export async function bootDemo(hooks: DemoHooks, options: DemoOptions = {}): Pro
   hint.className = "hint";
   hint.textContent = "拖拽旋转 · 滚轮缩放 · URL 追加 ?backend=webgpu|webgl2 切换后端";
   document.body.appendChild(hint);
+
+  // ?hud=0：隐藏 HUD 与提示（无头逐像素对比用；两个后端的设备名长度不同会改变 HUD 换行）
+  if (new URLSearchParams(location.search).get("hud") === "0") {
+    hud.style.display = "none";
+    hint.style.display = "none";
+  }
 
   const fpsEl = hud.querySelector("#fps")!;
   const errEl = hud.querySelector("#err")!;

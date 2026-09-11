@@ -92,3 +92,9 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 纯 CPU 部分（压平/三角化/矩阵/样式采样）在 `src/__tests__/render2d.test.ts`
 中覆盖，`npm test` 可直接运行；示例 `examples/shapes2d` 覆盖完整能力并在
 WebGL2 / WebGPU 上无头验证。
+
+> **跨后端一致性**：`Canvas2D` 一帧里会同时使用两套顶点/索引缓冲（彩色图形 `flat`
+> 与文本 `glyph`）。WebGL2 的索引缓冲绑定是 **VAO 状态**，写缓冲时若不解绑 VAO 会
+> 把 flat 的索引绑定改成 glyph 的，导致**整批彩色图形消失**（详情与修法见
+> [architecture.md §6.2](architecture.md)）。回归页 `examples/_verify-2d-clip`
+> （`npm run build:verify`）在两个后端上应逐像素完全一致。

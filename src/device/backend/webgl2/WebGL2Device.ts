@@ -360,6 +360,11 @@ export class WebGL2Device extends Device {
     }
   }
 
+  /** 当前绑定的 VAO（`GLBuffer` 写索引缓冲时需要保存/恢复，见 `GLBuffer.elementBindingSafe`） */
+  get boundVao(): WebGLVertexArrayObject | null {
+    return this._boundVao;
+  }
+
   /** 应用管线静态状态（深度/剔除/混合）。 */
   private applyPipelineState(p: GLRenderPipeline): void {
     const gl = this.gl;

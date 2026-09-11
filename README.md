@@ -78,7 +78,8 @@ composer.render((pass) => sceneRenderer.render(pass, scene, camera));
 - **左上角**是文字 HUD（后端 / fps / 场景统计 / 错误），**右上角**是参数面板；
 - 面板里的改动立即生效；URL 参数仍是**初始值**（例如 `?backend=webgl2&msaa=4`），
   两者不互相覆盖；
-- `?gui=0` 隐藏面板（截图/无头回归用）、`?gui=closed` 默认收起；
+- `?gui=0` 隐藏面板（截图/无头回归用）、`?gui=closed` 默认收起、`?hud=0` 隐藏左上角 HUD
+  与右下角提示（两个后端的设备名字符串长度不同，HUD 换行行数也不同，会干扰逐像素对比）；
 - 每个示例都保留了键盘快捷键（与面板等价），改键后面板会自动同步。
 
 ```ts
@@ -101,7 +102,7 @@ npm run typecheck      # 严格类型检查（src + examples + tests）
 npm test               # 构建并运行全部测试（97 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
-npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere）到 dist-examples/
+npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere / _verify-2d-clip）到 dist-examples/
 npm run serve          # 本地静态服务 → http://localhost:8080/
 ```
 
@@ -125,7 +126,9 @@ WebGL2 / WebGPU 共用一套实现：
 - 性能：CPU 三角化 → 动态合批，每帧少量 `drawIndexed`。
 
 `examples/shapes2d` 展示了上述全部能力（含动画与裁剪层叠）。
-模块用法与边界见 [docs/render2d.md](docs/render2d.md)。
+模块用法与边界见 [docs/render2d.md](docs/render2d.md)；
+「彩色图形 + 文本两套缓冲」在 WebGL2 上的索引绑定回归见
+[docs/architecture.md §6.2](docs/architecture.md)（回归页 `examples/_verify-2d-clip`）。
 
 ### 3D 材质与几何
 

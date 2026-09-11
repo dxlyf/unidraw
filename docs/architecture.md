@@ -222,6 +222,44 @@ binding 编号直接对应 WGSL `@group(g) @binding(b)`。
 - 单元测试覆盖两种约定：`mat4 perspective maps near/far planes (ZO)` 与
   `mat4 perspectiveGL 保留 GL 约定`。
 
+### 6.2 `ELEMENT_ARRAY_BUFFER` 绑定属于 VAO 状态（写索引缓冲必须避开当前 VAO）
+
+WebGL2 里「索引缓冲区」不是全局绑定，而是**每个 VAO 各存一份**：
+
+```ts
+gl.bindVertexArray(vao);                  // 之后的 ELEMENT_ARRAY_BUFFER 绑定写进 vao
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);// ← 改的是 vao 的索引绑定，不是全局状态
+```
+
+而框架的 VAO 是**缓存复用**的（`WebGL2Device._vaos`，每个「管线 + 顶点流 + 索引缓冲 +
+baseVertex」组合创建一次，之后只 `bindVertexArray`）。于是下面这种写法会互相踩：
+
+```ts
+flatIBuf.write(flatIndices);   // 内部 bindBuffer(ELEMENT_ARRAY_BUFFER, flatIBuf)
+textIBuf.write(textIndices);   // ← 把**当前 VAO**（flat 的 VAO）的索引绑定改成了 textIBuf
+```
+
+后果：flat 的 VAO 指向了 text 的索引缓冲区，后续 `drawElements` 读到**越界索引**
+（越界读取返回 0）→ 三角形退化成零面积 → **整批绘制凭空消失**（不是画错位置，是完全不可见）。
+
+- 触发条件很常见：同一帧里存在**两套顶点/索引缓冲**（典型是 `Canvas2D` 的
+  「彩色图形 flat」+「文本 glyph」）。`flush()` 先写 flat 再写 text，于是**所有彩色图形
+  在 WebGL2 上全部消失**，只剩文字可见（`examples/shapes2d` 的“只渲染了一部分”）；
+- WebGPU 没有 VAO，`queue.writeBuffer` 不改变任何绑定状态 —— 所以这是**只在 WebGL2
+  出现的后端差异**，单元测试（Mock 后端）也覆盖不到；
+- 修法：`GLBuffer` 在写 `ELEMENT_ARRAY_BUFFER` 前把 VAO 解绑到默认 VAO（0），写完恢复
+  原来的 VAO（`elementBindingSafe`）。默认 VAO 框架从不用于绘制，因此不会破坏缓存；
+  构造函数里的 `bufferData` 同样要走这条路径。
+
+回归页：`examples/_verify-2d-clip`（`npm run build:verify` 打包后无头跑，两个后端应
+**逐像素完全一致**）。
+
+> 顺带一提：`antialias` 在两端**不对称** —— WebGL2 的 canvas 上下文以
+> `antialias: true` 创建，WebGPU 的 canvas 默认没有 MSAA。因此细线段（如 1.5px 描边）
+> 的边缘覆盖率会有亚像素差异（表现为边缘 1~2 个像素的亮度不同），这是平台差异，
+> 不是内容缺失。做逐像素对比时请挑**粗几何/填充**区域，或给 WebGL2 传
+> `antialias: false`。
+
 ## 7. 纹理上传
 
 CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种后端：
