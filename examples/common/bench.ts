@@ -3,7 +3,7 @@
  *
  * 约定：
  * - 每个“档位”（preset）是一个独立场景，进入档位后热身后测量窗口平均帧耗时；
- * - 默认自动循环所有档位，点击档位可手动停留在该档；空格暂停/恢复自动循环；
+ * - 默认**不自动循环**：用右上角面板（lil-gui）点击档位，或 ←/→ 切换；空格开/关循环；
  * - 全程真实渲染（同一套 WebGL2/WebGPU 代码），测量的是完整帧（含提交）。
  *
  * 用法：
@@ -21,6 +21,7 @@ import type { Device } from "../../src/device/Device.js";
 import type { RenderPassEncoder } from "../../src/command/encoder.js";
 import { degToRad } from "../../src/math/mmath.js";
 import { attachOrbitControls } from "./demo.js";
+import { createGui } from "./gui.js";
 
 export interface BenchContext {
   renderer: Renderer;
@@ -89,8 +90,9 @@ function dwellFromUrl(fallback: number): number {
 }
 
 export async function bootBench(options: BenchOptions): Promise<BenchContext> {
-  const pixelScale = pixelScaleFromUrl(options.pixelScale ?? 1);
-  const dwellMs = dwellFromUrl(options.dwellMs ?? 3000);
+  const urlParams = new URLSearchParams(location.search);
+  const pixelScaleDefault = pixelScaleFromUrl(options.pixelScale ?? 1);
+  const dwellDefault = dwellFromUrl(options.dwellMs ?? 3000);
 
   // ---- DOM ---------------------------------------------------------------
   const canvas = document.createElement("canvas");
@@ -104,40 +106,24 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
     .hud b { color:#fff; }
     .chip { display:inline-block; padding:1px 8px; border-radius:10px; background:#1d2130; border:1px solid #343a4e; margin-left:6px; font-size:11px; }
     .err { color:#ff8f9e; white-space:pre-wrap; max-width:70vw; }
-    #panel { position:fixed; right:14px; top:12px; width:230px; z-index:10; font-size:12px; color:#c9cbd4; background:rgba(18,20,28,.72); border:1px solid #2b3040; border-radius:10px; padding:10px 12px; backdrop-filter: blur(4px); }
-    #panel .title { color:#fff; margin-bottom:6px; font-weight:600; }
-    #panel button { display:flex; justify-content:space-between; gap:8px; width:100%; text-align:left; margin:3px 0; padding:4px 8px; border-radius:7px; border:1px solid transparent; background:#22263a; color:#d7d9e0; cursor:pointer; font:inherit; }
-    #panel button.active { background:#2d4470; border-color:#6b96ff; }
-    #panel button .r { color:#8fc7ff; font-variant-numeric: tabular-nums; }
-    #panel .big { margin-top:8px; font-variant-numeric: tabular-nums; }
-    #panel .big .v { font-size:22px; color:#6fe3a1; }
-    #panel .hint { margin-top:8px; color:#6b7185; font-size:11px; }
-    #panel .status { margin-top:4px; color:#9aa0b5; font-variant-numeric: tabular-nums; white-space: pre; }
+    .hud .big { margin-top:6px; font-variant-numeric: tabular-nums; }
+    .hud .big .v { font-size:22px; color:#6fe3a1; }
+    .hud .status { margin-top:2px; color:#9aa0b5; font-variant-numeric: tabular-nums; white-space: pre; }
   `;
   document.head.appendChild(style);
 
   const hud = document.createElement("div");
   hud.className = "hud";
-  hud.innerHTML = `<b>${options.title}</b><span class="chip" id="chip"></span><br/><span id="err" class="err"></span>`;
+  hud.innerHTML =
+    `<b>${options.title}</b><span class="chip" id="chip"></span>` +
+    `<div class="big">帧耗时 <span class="v" id="big">—</span></div>` +
+    `<div class="status" id="status"></div>` +
+    `<div id="err" class="err"></div>`;
   document.body.appendChild(hud);
   const errEl = hud.querySelector("#err")!;
   const chip = hud.querySelector("#chip")!;
-
-  const panel = document.createElement("div");
-  panel.id = "panel";
-  panel.innerHTML = `
-    <div class="title">测量结果</div>
-    <div id="rows"></div>
-    <div class="big">帧耗时 <span class="v" id="big"></span></div>
-    <div class="status" id="status"></div>
-    <div class="hint" id="hint"></div>`;
-  document.body.appendChild(panel);
-  const rowsEl = panel.querySelector("#rows")!;
-  const bigEl = panel.querySelector("#big")!;
-  const statusEl = panel.querySelector("#status")!;
-  const hintEl = panel.querySelector("#hint")!;
-  hintEl.textContent =
-    "←/→ 或点击切换档位（默认不自动循环）· 空格：自动循环 · R：重测当前档位 · 拖拽旋转 / 滚轮缩放";
+  const bigEl = hud.querySelector("#big")!;
+  const statusEl = hud.querySelector("#status")!;
 
   window.addEventListener("error", (e) => (errEl.textContent = `[error] ${e.message}`));
   window.addEventListener("unhandledrejection", (e) => (errEl.textContent = `[promise] ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
@@ -176,16 +162,17 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   let warmFrames = 0;
   let dwellStart = performance.now();
   const autoFromUrl = (() => {
-    try {
-      const v = new URLSearchParams(location.search).get("cycle");
-      if (v === "1" || v === "true") return true;
-      if (v === "0" || v === "false") return false;
-    } catch {
-      /* ignore */
-    }
+    const v = urlParams.get("cycle");
+    if (v === "1" || v === "true") return true;
+    if (v === "0" || v === "false") return false;
     return null;
   })();
-  let auto = autoFromUrl ?? options.autoCycle ?? false;
+  const state = {
+    autoCycle: autoFromUrl ?? options.autoCycle ?? false,
+    dwellMs: dwellDefault,
+    pixelScale: pixelScaleDefault,
+    spin: true,
+  };
   let idx = 0;
   let scene: BenchScene;
 
@@ -211,23 +198,18 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   function activate(index: number): void {
     idx = Math.max(0, Math.min(options.presets.length - 1, index));
     scene = loadScene(idx);
-    refreshRows();
+    refreshLabels();
   }
 
   /** URL 参数 `?tier=N`（0 起）或 `?draws=6000`（按档位名匹配数字）指定初始档位 */
   const initialIndex = (() => {
-    try {
-      const params = new URLSearchParams(location.search);
-      const tier = params.get("tier");
-      if (tier !== null && Number.isFinite(Number(tier))) return Number(tier);
-      const draws = params.get("draws");
-      if (draws !== null) {
-        const want = Number(draws.replace(/[^0-9]/g, ""));
-        const found = options.presets.findIndex((p) => Number(p.name.replace(/[^0-9]/g, "")) === want);
-        if (found >= 0) return found;
-      }
-    } catch {
-      /* ignore */
+    const tier = urlParams.get("tier");
+    if (tier !== null && Number.isFinite(Number(tier))) return Number(tier);
+    const draws = urlParams.get("draws");
+    if (draws !== null) {
+      const want = Number(draws.replace(/[^0-9]/g, ""));
+      const found = options.presets.findIndex((p) => Number(p.name.replace(/[^0-9]/g, "")) === want);
+      if (found >= 0) return found;
     }
     return 0;
   })();
@@ -235,23 +217,68 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
   scene = loadScene(initialIndex);
   idx = initialIndex;
 
-  // 档位按钮
-  const buttons: HTMLButtonElement[] = [];
-  options.presets.forEach((p, i) => {
-    const b = document.createElement("button");
-    b.dataset.i = String(i);
-    b.innerHTML = `<span>${p.name}</span><span class="r" id="r${i}">—</span>`;
-    b.addEventListener("click", () => {
-      auto = false;
-      activate(i);
-    });
-    rowsEl.appendChild(b);
-    buttons.push(b);
-  });
+  // ---- 参数面板（lil-gui） ------------------------------------------------
+  const gui = createGui({ title: "性能测量", params: urlParams });
+  const tierFolder = gui.addFolder("档位");
+  /** 每档一个按钮：名字里带测量结果（激活的档位加 ●） */
+  const tierControllers = options.presets.map((preset, i) =>
+    tierFolder
+      .add(
+        {
+          [preset.name]: () => {
+            state.autoCycle = false;
+            syncPanel();
+            activate(i);
+          },
+        },
+        preset.name,
+      )
+      .name(preset.name),
+  );
 
-  function refreshRows(): void {
-    buttons.forEach((b, i) => b.classList.toggle("active", i === idx));
+  const measureFolder = gui.addFolder("测量");
+  measureFolder.add(state, "autoCycle").name("自动循环档位").onChange(syncPanel);
+  measureFolder.add(state, "dwellMs", 500, 10000, 100).name("每档停留 (ms)");
+  measureFolder.add(state, "pixelScale", { "1x（默认，可横评）": 1, "1.5x": 1.5, "2x": 2 }).name("渲染分辨率");
+  measureFolder.add(state, "spin").name("相机自动旋转");
+  measureFolder
+    .add({ 重测当前档位: () => activate(idx) }, "重测当前档位")
+    .name("重测当前档位");
+  measureFolder
+    .add(
+      {
+        下一档位: () => {
+          state.autoCycle = false;
+          syncPanel();
+          activate((idx + 1) % options.presets.length);
+        },
+      },
+      "下一档位",
+    )
+    .name("下一档位");
+
+  const monitor = { 帧耗时: "—", FPS: "—", 统计: "" };
+  const monitorFolder = gui.addFolder("实时监看");
+  const msCtrl = monitorFolder.add(monitor, "帧耗时").name("帧耗时").disable();
+  const fpsCtrl = monitorFolder.add(monitor, "FPS").name("FPS").disable();
+  const statsCtrl = monitorFolder.add(monitor, "统计").name("场景统计").disable();
+  monitorFolder.open();
+
+  function syncPanel(): void {
+    gui.controllersRecursive().forEach((c) => c.updateDisplay());
   }
+
+  function refreshLabels(): void {
+    tierControllers.forEach((ctrl, i) => {
+      const base = options.presets[i]!.name;
+      const measured = measuredMs[i];
+      ctrl.name(`${i === idx ? "● " : ""}${base}${measured !== undefined ? ` — ${measured.toFixed(1)} ms` : ""}`);
+      ctrl.updateDisplay();
+    });
+  }
+
+  /** 每档最近一次的测量结果（面板按钮上显示） */
+  const measuredMs: (number | undefined)[] = options.presets.map(() => undefined);
 
   function frameStats(): number[] {
     return ring.length >= 3 ? ring.slice(-Math.min(RING, ring.length)) : [];
@@ -265,11 +292,11 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
     prev = now;
 
     try {
-      renderer.resizeToDisplaySize(pixelScale);
+      renderer.resizeToDisplaySize(state.pixelScale);
       ctx.width = canvas.width;
       ctx.height = canvas.height;
       camera.aspect = canvas.width / Math.max(1, canvas.height);
-      if (auto) camera.yaw += 0.11 * Math.min(dtMs / 1000, 0.05);
+      if (state.spin) camera.yaw += 0.11 * Math.min(dtMs / 1000, 0.05);
       camera.update();
 
       const timeSec = now / 1000;
@@ -290,13 +317,22 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
     if (s.length > 0) {
       avgMs = s.reduce((a, b) => a + b, 0) / s.length;
       bigEl.textContent = `${avgMs.toFixed(2)} ms · ${(1000 / avgMs).toFixed(0)} fps`;
-      const rEl = document.querySelector(`#r${idx}`)!;
-      rEl.textContent = `${avgMs.toFixed(1)} ms`;
+      measuredMs[idx] = avgMs;
+      monitor.帧耗时 = avgMs.toFixed(2) + " ms";
+      monitor.FPS = (1000 / avgMs).toFixed(0);
+      msCtrl.updateDisplay();
+      fpsCtrl.updateDisplay();
+      refreshLabels();
     }
-    statusEl.textContent = scene.status ? scene.status(avgMs) : "";
+    const statusText = scene.status ? scene.status(avgMs) : "";
+    statusEl.textContent = statusText;
+    if (monitor.统计 !== statusText) {
+      monitor.统计 = statusText;
+      statsCtrl.updateDisplay();
+    }
 
     // 档位切换
-    if (auto && now - dwellStart >= dwellMs) {
+    if (state.autoCycle && now - dwellStart >= state.dwellMs) {
       const next = (idx + 1) % options.presets.length;
       activate(next);
     }
@@ -304,21 +340,22 @@ export async function bootBench(options: BenchOptions): Promise<BenchContext> {
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
+  syncPanel();
+  refreshLabels();
 
-  // 空格切换自动/手动
+  // 键盘快捷键（与面板等价）
   window.addEventListener("keydown", (e) => {
     if (e.code === "Space") {
       e.preventDefault();
-      auto = !auto;
-      if (auto) dwellStart = performance.now();
-      hintEl.textContent = auto
-        ? "自动循环档位中 · 点击档位或 ←/→ 手动停留 · 空格：暂停循环"
-        : "已固定在当前档位 · ←/→ 或点击切换档位 · 空格：恢复自动循环";
+      state.autoCycle = !state.autoCycle;
+      if (state.autoCycle) dwellStart = performance.now();
+      syncPanel();
     } else if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
       e.preventDefault();
-      auto = false;
+      state.autoCycle = false;
       const dir = e.code === "ArrowRight" ? 1 : -1;
       activate((idx + dir + options.presets.length) % options.presets.length);
+      syncPanel();
     } else if (e.code === "KeyR") {
       // 重测当前档位（清空测量窗口重新热身）
       activate(idx);

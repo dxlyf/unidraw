@@ -30,6 +30,7 @@ import { FullScreenPass, POSTFX_COMMON_GLSL, POSTFX_COMMON_WGSL } from "../../sr
 import { ShadowRenderer } from "../../src/render/shadow/index.js";
 import { InputManager } from "../../src/interaction/InputManager.js";
 import { attachOrbitControls } from "../common/demo.js";
+import { addButtons, applyUrlOverrides, createGui } from "../common/gui.js";
 
 const canvas = document.createElement("canvas");
 canvas.id = "canvas";
@@ -126,7 +127,18 @@ scene.add(spot);
 const sceneRenderer = new SceneRenderer();
 const shadows = new ShadowRenderer(device, { label: "demo-shadow" });
 
-const state = { shadows: true, lights: "both" as "sun" | "spot" | "both", mapSize: 1024 };
+const state = {
+  shadows: true,
+  lights: "both" as "sun" | "spot" | "both",
+  mapSize: 1024,
+  /** 太阳方位角（度） */
+  sunYaw: -50,
+  /** 太阳高度角（度，负数 = 从上方照下） */
+  sunPitch: -48,
+  autoSpin: true,
+  orbiting: true,
+};
+applyUrlOverrides(state, params);
 function applyState(): void {
   sun.castShadow = state.shadows && state.lights !== "spot";
   spot.castShadow = state.shadows && state.lights !== "sun";
@@ -151,7 +163,7 @@ function updateHud(): void {
     `灯光      : ${state.lights}（方向光 ${sun.castShadow ? "投影" : "不投影"} / 聚光 ${spot.castShadow ? "投影" : "不投影"}）\n` +
     `阴影片数  : ${shadows.stats.maps}  跳过 ${shadows.stats.skipped}  阴影 pass 绘制 ${shadows.stats.drawn}\n` +
     `拟合包围球: 半径 ${shadows.boundsRadius.toFixed(2)}  中心 (${shadows.boundsCenter.x.toFixed(2)}, ${shadows.boundsCenter.y.toFixed(2)}, ${shadows.boundsCenter.z.toFixed(2)})\n` +
-    `keys      : S 阴影 · L 灯光 · R 转太阳 · 1/2 贴图 1024/2048`;
+    `面板      : 右上角 lil-gui 可调（?gui=0 关闭）`;
 }
 
 const input = new InputManager(canvas, { preventWheelDefault: true });
@@ -163,8 +175,55 @@ input.on("keydown", (e) => {
   else if (e.code === "Digit2") state.mapSize = 2048;
   else return;
   applyState();
+  gui?.controllersRecursive().forEach((c) => c.updateDisplay());
 });
 applyState();
+
+// ---- 参数面板（lil-gui） ----------------------------------------------------
+const gui = createGui({ title: "阴影（Shadow Map）", params });
+gui.add(state, "shadows").name("开启阴影").onChange(applyState);
+gui
+  .add(state, "lights", { "方向光 + 聚光": "both", 仅方向光: "sun", 仅聚光: "spot" })
+  .name("灯光")
+  .onChange(applyState);
+gui
+  .add(state, "mapSize", { "512": 512, "1024": 1024, "2048": 2048, "4096": 4096 })
+  .name("贴图边长")
+  .onChange(applyState);
+const sunFolder = gui.addFolder("方向光（太阳）");
+sunFolder.add(state, "sunYaw", -180, 180, 1).name("方位角").onChange(applySun);
+sunFolder.add(state, "sunPitch", -85, -5, 1).name("高度角").onChange(applySun);
+sunFolder.add(sun, "intensity", 0, 3, 0.01).name("强度");
+sunFolder.add(sun.shadow, "bias", 0, 0.01, 0.0001).name("深度偏移 bias");
+sunFolder.add(sun.shadow, "normalBias", 0, 0.2, 0.005).name("法线偏移");
+sunFolder.add(sun.shadow, "radius", 0, 4, 0.05).name("PCF 半径");
+sunFolder.add(sun.shadow, "areaSize", 0, 40, 0.5).name("正交半宽（0=自动）");
+sunFolder.add(state, "autoSpin").name("太阳缓慢转动");
+const spotFolder = gui.addFolder("聚光");
+spotFolder.add(spot, "intensity", 0, 600, 1).name("强度");
+spotFolder.add(spot, "distance", 5, 60, 0.5).name("影响距离");
+spotFolder.add(spot.shadow, "bias", 0, 0.01, 0.0001).name("深度偏移");
+spotFolder.add(spot.shadow, "radius", 0, 4, 0.05).name("PCF 半径");
+spotFolder.add(state, "orbiting").name("聚光绕场旋转");
+spotFolder.close();
+addButtons(gui, "操作", {
+  重置太阳: () => {
+    state.sunYaw = -50;
+    state.sunPitch = -48;
+    sun.shadow.areaSize = 0;
+    sun.direction.set(-1.1, -0.85, 0.6);
+    gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  },
+});
+
+/** 由方位角/高度角设置太阳方向（光的传播方向：从光源射向场景） */
+function applySun(): void {
+  const yaw = degToRad(state.sunYaw);
+  const pitch = degToRad(state.sunPitch);
+  const cos = Math.cos(pitch);
+  sun.direction.set(-cos * Math.sin(yaw), Math.sin(pitch), -cos * Math.cos(yaw));
+}
+applySun();
 
 // ---- 自检 ------------------------------------------------------------------
 const selfTest = params.get("selftest") !== "0";
@@ -361,9 +420,14 @@ function mapArt(pixels: Uint8Array, size: number): string {
 function animate(t: number): void {
   if (frozen) return;
   // 太阳缓慢转（阴影随之移动）；聚光画圈；小球上下浮动
-  sun.direction.set(-0.55 + Math.sin(t * 0.25) * 0.5, -1, -0.35 + Math.cos(t * 0.25) * 0.4);
-  spot.setPosition(Math.cos(t * 0.45) * 6, 7.5, Math.sin(t * 0.45) * 6);
-  spot.setDirection(-Math.cos(t * 0.45) * 0.7, -1, -Math.sin(t * 0.45) * 0.7);
+  if (state.autoSpin) {
+    state.sunYaw = -50 + Math.sin(t * 0.25) * 30;
+    applySun();
+  }
+  if (state.orbiting) {
+    spot.setPosition(Math.cos(t * 0.45) * 6, 7.5, Math.sin(t * 0.45) * 6);
+    spot.setDirection(-Math.cos(t * 0.45) * 0.7, -1, -Math.sin(t * 0.45) * 0.7);
+  }
   ball.setPosition(ballAnchor.x, ballAnchor.y + Math.sin(t * 1.1) * ballAnchor.h, ballAnchor.z);
   for (let i = 0; i < movers.length; i++) {
     const m = movers[i]!;

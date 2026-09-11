@@ -37,6 +37,7 @@
   "devDependencies": {
     "@webgpu/types": "^0.1.72",
     "esbuild": "^0.28.2",
+    "lil-gui": "^0.21.0",
     "typescript": "^7.0.2"
   },
   "allowScripts": {

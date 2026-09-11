@@ -5,7 +5,8 @@
  * - 方向光：暖色平行光（模拟太阳），从左上打下；
  * - 点光：3 个彩色点光绕场旋转（世界位置来自节点），展示距离衰减；
  * - 聚光：从上方缓慢画圈的白色聚光，展示 `angle` / `penumbra` / `distance`；
- * - 键盘 1/2/3/4 切换各类型灯、5 全开、0 全关（全关 = 无光照，只剩 Unlit 地面）；
+ * - 键盘 1/2/3/4 切换各类型灯、5 全开、0 全关、Space 暂停旋转（全关 = 无光照，只剩 Unlit 地面）；
+ *   右上角 lil-gui 面板是同一份参数的图形入口（`?gui=0` 关面板），快捷键只是别名；
  * - `?selftest=1`（默认）：离屏渲染四种灯光配置并比较亮像素比例，
  *   证明「关灯会变暗、单灯能照亮」，同时给出跨后端可比的数值。
  *
@@ -14,6 +15,7 @@
  */
 
 import { bootDemo } from "../common/demo.js";
+import { addButtons, applyUrlOverrides, createGui } from "../common/gui.js";
 import { Geometry } from "../../src/render/Geometry.js";
 import { box, capsule, cone, cylinder, plane, sphere, torus } from "../../src/render/primitives.js";
 import { ColorMaterial, PhongMaterial, UnlitColorMaterial } from "../../src/render/material.js";
@@ -104,21 +106,52 @@ bootDemo({
     spot.setPosition(0, 7, 0);
     scene.add(spot);
 
-    // ---- HUD / 交互 --------------------------------------------------------
+    // ---- HUD / 参数面板 ----------------------------------------------------
+    // 文字 HUD 在左上角（bootDemo 的标题下方），右上角留给 lil-gui 面板
     const hud = document.createElement("div");
     hud.id = "light-hud";
     hud.style.cssText =
-      "position:fixed;right:12px;top:12px;color:#d7d9e0;font:12px/1.6 ui-monospace,Consolas,monospace;" +
+      "position:fixed;left:12px;top:96px;color:#d7d9e0;font:12px/1.6 ui-monospace,Consolas,monospace;" +
       "background:rgba(16,18,26,.72);border:1px solid #2b3040;border-radius:8px;padding:10px 12px;z-index:20;white-space:pre;pointer-events:none";
     document.body.appendChild(hud);
 
-    const state = { ambient: true, sun: true, points: true, spot: true };
+    const params = new URLSearchParams(location.search);
+    const state = {
+      ambient: true,
+      sun: true,
+      points: true,
+      spot: true,
+      /** 点光/聚光绕场旋转（Space 暂停） */
+      autoRotate: true,
+      ambientIntensity: 0.5,
+      sunIntensity: 0.9,
+      pointIntensity: 30,
+      pointDistance: 16,
+      pointDecay: 2,
+      /** 聚光外锥半角（度） */
+      spotAngle: 22,
+      spotPenumbra: 0.4,
+      spotDistance: 24,
+      spotIntensity: 60,
+    };
+    applyUrlOverrides(state, params);
     function applyState(): void {
       ambient.visible = state.ambient;
+      ambient.intensity = state.ambientIntensity;
       sun.visible = state.sun;
-      for (const p of points) p.visible = state.points;
+      sun.intensity = state.sunIntensity;
+      for (const p of points) {
+        p.visible = state.points;
+        p.intensity = state.pointIntensity;
+        p.distance = state.pointDistance;
+        p.decay = state.pointDecay;
+      }
       spot.visible = state.spot;
+      spot.intensity = state.spotIntensity;
+      spot.setAngle(degToRad(state.spotAngle), state.spotPenumbra);
+      spot.distance = state.spotDistance;
     }
+    applyState();
     function updateHud(lightCount: number, usedDefault: boolean): void {
       const on = (b: boolean): string => (b ? "●" : "○");
       hud.textContent =
@@ -127,9 +160,48 @@ bootDemo({
         `${on(state.points)} 3 点光 PointLight ×${points.length}     intensity ${points[0]!.intensity} range ${points[0]!.distance} decay ${points[0]!.decay}\n` +
         `${on(state.spot)} 4 聚光 SpotLight          angle ${Math.round((spot.angle * 180) / Math.PI)}° penumbra ${spot.penumbra} range ${spot.distance}\n` +
         `光照：${lightCount} 盏${usedDefault ? "（默认光）" : ""}   顶部上限：方向 4 / 点 8 / 聚 4\n` +
-        `keys: 1/2/3/4 开关 · 5 全开 · 0 全关 · Space 暂停旋转`;
+        `面板      : 右上角 lil-gui 可调（?gui=0 关闭）`;
     }
 
+    // ---- 参数面板（lil-gui） -----------------------------------------------
+    const gui = createGui({ title: "灯光（Lights）", params });
+    /** 键盘改完 state 后把面板数值刷新成真实值 */
+    const syncControllers = (): void => {
+      gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    };
+    gui.add(state, "ambient").name("环境光 AmbientLight（1）").onChange(applyState);
+    gui.add(state, "sun").name("方向光 DirectionalLight（2）").onChange(applyState);
+    gui.add(state, "points").name("点光 PointLight ×3（3）").onChange(applyState);
+    gui.add(state, "spot").name("聚光 SpotLight（4）").onChange(applyState);
+    gui.add(state, "autoRotate").name("自动旋转（Space）");
+    const ambientFolder = gui.addFolder("环境光 AmbientLight");
+    ambientFolder.add(state, "ambientIntensity", 0, 2, 0.01).name("强度").onChange(applyState);
+    const sunFolder = gui.addFolder("方向光 DirectionalLight");
+    sunFolder.add(state, "sunIntensity", 0, 3, 0.01).name("强度").onChange(applyState);
+    const pointFolder = gui.addFolder("点光 PointLight");
+    pointFolder.add(state, "pointIntensity", 0, 200, 1).name("强度").onChange(applyState);
+    pointFolder.add(state, "pointDistance", 1, 60, 0.5).name("影响距离").onChange(applyState);
+    pointFolder.add(state, "pointDecay", 0, 4, 0.1).name("衰减 decay").onChange(applyState);
+    const spotFolder = gui.addFolder("聚光 SpotLight");
+    spotFolder.add(state, "spotIntensity", 0, 300, 1).name("强度").onChange(applyState);
+    spotFolder.add(state, "spotAngle", 1, 80, 1).name("锥角（度）").onChange(applyState);
+    spotFolder.add(state, "spotPenumbra", 0, 1, 0.01).name("半影 penumbra").onChange(applyState);
+    spotFolder.add(state, "spotDistance", 1, 60, 0.5).name("影响距离").onChange(applyState);
+    spotFolder.close();
+    addButtons(gui, "操作", {
+      全部打开: () => {
+        state.ambient = state.sun = state.points = state.spot = true;
+        applyState();
+        syncControllers();
+      },
+      全部关闭: () => {
+        state.ambient = state.sun = state.points = state.spot = false;
+        applyState();
+        syncControllers();
+      },
+    });
+
+    // 快捷键与面板等价（键盘党友好），改完同步面板显示
     window.addEventListener("keydown", (e) => {
       if (e.code === "Digit1") state.ambient = !state.ambient;
       else if (e.code === "Digit2") state.sun = !state.sun;
@@ -139,8 +211,11 @@ bootDemo({
         state.ambient = state.sun = state.points = state.spot = true;
       } else if (e.code === "Digit0") {
         state.ambient = state.sun = state.points = state.spot = false;
+      } else if (e.code === "Space") {
+        state.autoRotate = !state.autoRotate;
       } else return;
       applyState();
+      syncControllers();
     });
 
     // ---- 渲染（手动收集灯光并喂给材质） ------------------------------------
@@ -234,7 +309,7 @@ bootDemo({
         c.camera.center.set(0, 0, 0);
         c.camera.distance = 12;
         c.camera.pitch = 0.2;
-        c.camera.yaw += c.dt * 0.04;
+        c.camera.yaw += state.autoRotate ? c.dt * 0.04 : 0;
         c.camera.update();
 
         drawScene(pass, c.camera);

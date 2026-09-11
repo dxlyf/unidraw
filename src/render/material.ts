@@ -7,3 +7,4 @@ export * from "./ColorMaterial.js";
 export * from "./UnlitColorMaterial.js";
 export * from "./PhongMaterial.js";
 export * from "./TextureMaterial.js";
+export * from "./blendModes.js";

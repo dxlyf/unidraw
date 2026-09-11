@@ -16,6 +16,7 @@
 | 三种后端 | **WebGL2**（完整实现）、**WebGPU**（完整实现）、**Mock**（无头 CPU 后端，Node 单测用） |
 | 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包；支持**动态偏移环形 UBO**（共享材质逐物体矩阵，一次绘制换一个槽） |
 | 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
+| 混合模式 | `MaterialOptions.blend` 自定义混合状态（src/dst factor + operation，与 WebGPU `GPUBlendComponent` 一一对应）、`BLEND_PRESETS` 常用预设、`depthWrite` 开关；带 `blend`/`alphaBlend` 的材质自动标记为半透明，`SceneRenderer` 把它们排在不透明物体之后并按距离**远→近**绘制 |
 | 灯光 | `AmbientLight` / `DirectionalLight`(平行光) / `PointLight` / `SpotLight`（锥角+半影），灯是场景图节点、可动画驱动；每帧自动收集打包进 `LightsBlock`（方向 4 / 点 8 / 聚 4，无灯时使用与历史等价的默认光） |
 | 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 纹素对齐）/ 聚光（透视）各一张深度贴图，3×3 PCF 软阴影；`mapSize`/`bias`/`normalBias`/`radius` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
 | 实例化 | `InstancedMesh`：同一几何体 + 材质一次 draw 画 N 个实例（实例矩阵走 `stepMode: "instance"` 顶点流），自带脏区间上传、联合包围球剔除、阴影/拾取支持；与「N 个独立 Mesh」逐像素一致（示例自检 meanDiff = 0） |
@@ -29,9 +30,66 @@
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
 | 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / 实例化 / 资源缓存 / App·插件（`node --test`，129 个用例） |
-| 示例 | 16 个可运行示例（同一源码切 WebGL2 / WebGPU），含 **2D 绘制**、**3D 材质与几何画廊**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
+| 示例 | 18 个可运行示例（同一源码切 WebGL2 / WebGPU），全部带 **lil-gui 参数面板**：**示例游戏《坦克世界》**、**2D 绘制**、**3D 材质与几何画廊**、**混合模式**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
 
-零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）。
+零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）、`lil-gui`（示例的参数面板）。
+
+---
+
+---
+
+## 示例游戏《坦克世界》
+
+`examples/tank-world` 是一个**把框架能力串起来**的完整小游戏：驾驶坦克在战场上与 AI
+对射，含炮弹飞行与命中、伤害与复活、计分、枪口闪光/爆炸/烟雾、阴影与后处理。
+
+```ts
+// 车体 → 炮塔 → 炮管 → 炮口 的层级，炮塔独立于车体旋转
+const tank = new Tank(device, scene, { color: "#3f7ddb", speed: 14, reloadTime: 1.05 });
+
+// 一帧逻辑（输入驱动，与渲染解耦 → 同一份代码可被自检脚本驱动）
+stepGame(dt, { drive: 1, turn: 0, turretYaw, fire: true });
+
+// 渲染：阴影单独提交 + 后处理链
+shadowRenderer.renderAndSubmit(scene, camera, sceneRenderer);
+composer.render((pass) => sceneRenderer.render(pass, scene, camera));
+```
+
+- 玩法：**W/S** 前后、**A/D** 转向、**鼠标** 瞄准、**空格/左键** 开火、**Shift** 慢动作、**R** 重开；
+- 敌人 AI：巡逻 → 追击 → 保持距离并开火，被击毁后复活；
+- 右上角 lil-gui：敌人数 / 速度 / 伤害 / 装填 / 敌人精度 / 慢动作 / 阴影 / MSAA / 后处理 / 相机；
+- `TANK_SELFTEST` 用**脚本输入 + 固定步长**做确定性模拟，断言移动/开火/命中/击毁/AI 反击/
+  特效/渲染/阴影全部生效（WebGL2 与 WebGPU 数值一致）：
+
+```json
+{"backend":"webgpu","moved":14,"shots":4,"hits":3,"kills":1,"enemyHpDrop":68,"enemyShots":3,
+ "maxShells":2,"maxEffects":8,"meanLuma":0.1689,"shadowDiff":0.0036,
+ "moveOk":true,"fireOk":true,"hitOk":true,"killOk":true,"aiOk":true,"effectOk":true,
+ "renderOk":true,"shadowOk":true}
+```
+
+详见 [docs/game.md](docs/game.md)。
+
+## 示例的参数面板（lil-gui）
+
+所有示例都用 [lil-gui](https://lil-gui.georgealways.com/) 作为参数面板
+（`examples/common/gui.ts` 统一了位置与主题）：
+
+- **左上角**是文字 HUD（后端 / fps / 场景统计 / 错误），**右上角**是参数面板；
+- 面板里的改动立即生效；URL 参数仍是**初始值**（例如 `?backend=webgl2&msaa=4`），
+  两者不互相覆盖；
+- `?gui=0` 隐藏面板（截图/无头回归用）、`?gui=closed` 默认收起；
+- 每个示例都保留了键盘快捷键（与面板等价），改键后面板会自动同步。
+
+```ts
+import { applyUrlOverrides, createGui } from "../common/gui.js";
+
+const state = { bloom: true, strength: 1.1 };
+applyUrlOverrides(state, params);          // ?strength=2 覆盖初始值
+const gui = createGui({ title: "后处理", params });
+gui.add(state, "bloom").name("泛光").onChange(apply);
+gui.add(state, "strength", 0, 3, 0.01).name("强度").onChange(apply);
+```
 
 ---
 
@@ -51,7 +109,6 @@ npm run serve          # 本地静态服务 → http://localhost:8080/
 用 URL 参数强制后端：`?backend=webgl2` / `?backend=webgpu`。
 
 ### 2D 绘制（框架模块 `src/render2d` + 示例 `examples/shapes2d`）
-
 框架内置了 Canvas2D 风格的 **`Canvas2D` 模块**（`src/render2d/`），
 WebGL2 / WebGPU 共用一套实现：
 
@@ -82,6 +139,31 @@ WebGL2 / WebGPU 共用一套实现：
   `capsule`，全部带正确 UV/法线与朝外绕序（内置自检工具修正）；
 - 示例 `examples/shapes3d` 以画廊形式展示几何 × 材质组合并旋转。
 
+### 混合模式（`MaterialOptions.blend`）
+
+```ts
+import { PhongMaterial, BLEND_PRESETS, blendState } from "unidraw";
+
+// 预设：正常 / 叠加(发光) / 正片叠底 / 滤色 / 预乘 alpha / 相减 / min / max / 覆盖
+const glass = new PhongMaterial(device, color, {
+  blend: BLEND_PRESETS.find((p) => p.id === "additive")!.state,
+  depthWrite: false,          // 半透明通常不写深度，才能看到后面的半透明
+});
+
+// 也可以直接写因子与运算（与 WebGPU GPUBlendComponent 一一对应）
+const custom = new ColorMaterial(device, color, {
+  blend: blendState({ src: "src-alpha", dst: "one", op: "add" }),
+});
+```
+
+- 带 `blend` 或 `alphaBlend` 的材质会被标记为**半透明**：`SceneRenderer` 把它们排在
+  不透明物体之后、按距离**远→近**绘制（否则叠加顺序会错）；
+- `depthWrite: false` 仍参与深度测试（被不透明物体正确遮挡），但不写深度，避免
+  半透明互相遮挡；
+- 示例 `examples/blend` 用 lil-gui 实时切换预设/因子/运算/不透明度/写深度/排序，
+  自检 `BLEND_SELFTEST` 验证「叠加变亮、正片叠底变暗、排序与写深度确实影响结果」
+  （两后端数值一致）。
+
 ### 性能示例
 
 三个性能示例共用 `examples/common/bench.ts` 的测量框架（默认**不自动换档**，
@@ -93,8 +175,11 @@ WebGL2 / WebGPU 共用一套实现：
 | `perf-instanced` | 单 draw 内实例化吞吐（顶点/光栅压力） | 4 096 → 262 144 个实例 |
 | `perf-triangles` | 高细分网格的三角形吞吐 | 32×16 → 224×112 细分 ×4 份 |
 
-- 每档先预热 12 帧，再取 90 帧窗口平均，右上角逐档显示 ms / fps（drawcalls 档另显示 **µs/draw**）；
-- 渲染分辨率固定为 CSS 像素（可 `?scale=2`），保证不同档位可比。
+- 每档先预热 12 帧，再取 90 帧窗口平均；右上角 **lil-gui 面板**列出所有档位
+  （激活档位带 `●`，按钮名字里直接显示该档的 ms）+ 实时监看（帧耗时 / fps / 场景统计），
+  另有「自动循环 / 每档停留 / 渲染分辨率 / 相机自动旋转 / 重测」等开关；
+- 渲染分辨率默认固定为 CSS 像素（面板或 `?scale=2` 可改），保证不同档位可比；
+- 快捷键仍然可用：`←/→` 换档、空格开关自动循环、`R` 重测；`?gui=0` 可关掉面板。
 
 ### 性能（draw call 压力）
 
@@ -346,7 +431,7 @@ src/
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      16 个示例 + common/（demo 引导、bench 测量框架）
+examples/      18 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```
@@ -379,6 +464,8 @@ docs/          中文文档（见下）
 - [灯光（环境光/方向光/点光/聚光）](docs/lighting.md)
 - [阴影（Shadow Map）](docs/shadows.md)
 - [实例化（InstancedMesh）](docs/instancing.md)
+- [混合模式（blend）](docs/blend.md)
+- [示例游戏《坦克世界》](docs/game.md)
 - [离屏渲染与后处理（RenderTarget · MSAA · EffectComposer）](docs/postfx.md)
 - [App 门面与插件](docs/app.md)
 - [着色器写作指南](docs/shader-guide.md)

@@ -2,8 +2,10 @@
  * 后处理示例：RenderTarget + EffectComposer + Bloom / ToneMap / Vignette。
  *
  * - 场景先画进 `composer.sceneTarget`（可开 MSAA，自动 resolve），再过效果链，最后输出到画布；
+ * - 右上角 lil-gui 面板可实时改所有参数（`?gui=0` 关面板）：后处理链 / 泛光（阈值、强度、
+ *   半径、中间层比例）/ 色调映射（模式、曝光）/ 暗角（强度、柔化）/ MSAA；
  * - 键盘：B 泛光开关 · T 循环色调映射(aces/reinhard/linear/none) · V 暗角 · M 切 MSAA(1/4)
- *   · P 整条后处理链开关（直接画布 vs 后处理，便于肉眼对比）；
+ *   · P 整条后处理链开关（直接画布 vs 后处理，便于肉眼对比）—— 快捷键是面板的等价别名；
  * - `?selftest=1`（默认）：离屏跑三种配置并比较像素统计，打印 POSTFX_SELFTEST。
  */
 
@@ -21,6 +23,7 @@ import { AmbientLight, DirectionalLight, PointLight } from "../../src/render/lig
 import { BloomPass, EffectComposer, ToneMapPass, VignettePass, type ToneMappingMode } from "../../src/render/postfx/index.js";
 import { InputManager } from "../../src/interaction/InputManager.js";
 import { attachOrbitControls } from "../common/demo.js";
+import { addButtons, applyUrlOverrides, createGui } from "../common/gui.js";
 
 const canvas = document.createElement("canvas");
 canvas.id = "canvas";
@@ -95,27 +98,69 @@ scene.add(point);
 
 const sceneRenderer = new SceneRenderer();
 
-// ---- 后处理链 ----------------------------------------------------------
+// ---- 后处理链（参数集中在 state：URL 给初值，面板/键盘实时改） ----------
 const msaaFromUrl = (() => {
   const v = Number(params.get("msaa"));
   return v === 1 || v === 4 ? v : 4;
 })();
-let msaa = Math.min(msaaFromUrl, device.limits.maxSamples ?? 1);
+const state = {
+  /** 整条后处理链开关（关掉 = 直接画到画布，便于肉眼对比） */
+  post: true,
+  bloom: true,
+  vignette: true,
+  tonemap: "aces" as ToneMappingMode,
+  /** 泛光亮度阈值 */
+  threshold: 0.65,
+  /** 泛光叠加强度 */
+  strength: 1.1,
+  /** 泛光模糊半径（像素） */
+  radius: 2.2,
+  /** 泛光中间层分辨率比例。进的是 RenderTarget 尺寸 → 不可热改，改它要重建 BloomPass */
+  bloomScale: 0.5,
+  exposure: 1.15,
+  vignetteStrength: 0.45,
+  vignetteSoftness: 0.7,
+  msaa: msaaFromUrl,
+};
+applyUrlOverrides(state, params);
+
+const normalizeMsaa = (v: number): number => (v === 1 || v === 4 ? v : 4);
+let msaa = Math.min(normalizeMsaa(state.msaa), device.limits.maxSamples ?? 1);
+state.msaa = msaa;
+
 const composer = new EffectComposer(device, {
   width: canvas.width,
   height: canvas.height,
   sampleCount: msaa,
   label: "postfx",
 });
-const bloom = new BloomPass(device, { threshold: 0.65, strength: 1.1, radius: 2.2, scale: 0.5 });
-const tonemap = new ToneMapPass(device, { mode: "aces", exposure: 1.15 });
-const vignette = new VignettePass(device, { strength: 0.45, softness: 0.7 });
-composer.addPass(bloom);
-composer.addPass(tonemap);
-composer.addPass(vignette);
+/** `scale` 在构造时就决定了中间层 RenderTarget 的尺寸，无法热改 → 换比例时整个 pass 重建 */
+function createBloom(): BloomPass {
+  return new BloomPass(device, {
+    threshold: state.threshold,
+    strength: state.strength,
+    radius: state.radius,
+    scale: state.bloomScale,
+  });
+}
+let bloom = createBloom();
+const tonemap = new ToneMapPass(device, { mode: "aces", exposure: state.exposure });
+const vignette = new VignettePass(device, { strength: state.vignetteStrength, softness: state.vignetteSoftness });
 
-const state = { post: true, bloom: true, vignette: true, tonemap: "aces" as ToneMappingMode };
-bloom.threshold = 0.65;
+function applyBloomParams(): void {
+  bloom.threshold = state.threshold;
+  bloom.strength = state.strength;
+  bloom.radius = state.radius;
+}
+
+function applyTonemapParams(): void {
+  tonemap.exposure = state.exposure;
+}
+
+function applyVignetteParams(): void {
+  vignette.strength = state.vignetteStrength;
+  vignette.softness = state.vignetteSoftness;
+}
 
 function applyState(): void {
   composer.passList.length = 0;
@@ -126,6 +171,93 @@ function applyState(): void {
   }
   if (state.vignette) composer.addPass(vignette);
 }
+applyState();
+applyBloomParams();
+applyTonemapParams();
+applyVignetteParams();
+
+let composerMsaa = msaa;
+function rebuildComposer(): void {
+  if (msaa === composerMsaa) return;
+  composerMsaa = msaa;
+  // 只换场景目标的采样数：链路内部目标与效果实例保持复用。
+  // 材质会按附件的采样数自动取到匹配的管线（Multisample），无需手动重建。
+  composer.setSampleCount(msaa);
+}
+
+/** 面板/键盘改 MSAA：非 1/4 或设备上限更低时按上限收敛，回写 state 让面板显示真实值 */
+function applyMsaa(): void {
+  state.msaa = Math.min(normalizeMsaa(state.msaa), device.limits.maxSamples ?? 1);
+  msaa = state.msaa;
+  rebuildComposer();
+}
+
+/** 中间层比例变了 → 新建 BloomPass（内部目标尺寸随 scale）并替换进链里 */
+function rebuildBloom(): void {
+  const next = createBloom();
+  bloom.dispose();
+  bloom = next;
+  applyState();
+  syncControllers();
+}
+
+/** 重建后把面板里的数值刷新成真实状态（键盘/按钮/自检回写都走这里） */
+function syncControllers(): void {
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+}
+
+// ---- 参数面板（lil-gui） -----------------------------------------------
+const gui = createGui({ title: "后处理（PostFX）", params });
+gui.add(state, "post").name("后处理链").onChange(applyState);
+gui
+  .add(state, "msaa", { "1x（关 MSAA）": 1, "4x": 4 })
+  .name("MSAA")
+  .onChange(() => {
+    applyMsaa();
+    syncControllers();
+  });
+gui.add(state, "bloom").name("泛光开关").onChange(applyState);
+const bloomFolder = gui.addFolder("泛光 Bloom");
+bloomFolder.add(state, "threshold", 0, 1.5, 0.01).name("阈值").onChange(applyBloomParams);
+bloomFolder.add(state, "strength", 0, 3, 0.01).name("强度").onChange(applyBloomParams);
+bloomFolder.add(state, "radius", 0, 6, 0.05).name("半径（像素）").onChange(applyBloomParams);
+bloomFolder
+  .add(state, "bloomScale", { "1/4": 0.25, "1/2": 0.5, "3/4": 0.75, "1/1": 1 })
+  .name("中间层比例（重建）")
+  .onChange(rebuildBloom);
+const tonemapFolder = gui.addFolder("色调映射 ToneMap");
+tonemapFolder
+  .add(state, "tonemap", { ACES: "aces", Reinhard: "reinhard", 线性: "linear", 关闭: "none" })
+  .name("模式")
+  .onChange(applyState);
+tonemapFolder.add(state, "exposure", 0, 3, 0.01).name("曝光").onChange(applyTonemapParams);
+const vignetteFolder = gui.addFolder("暗角 Vignette");
+vignetteFolder.add(state, "vignette").name("开关").onChange(applyState);
+vignetteFolder.add(state, "vignetteStrength", 0, 1, 0.01).name("强度").onChange(applyVignetteParams);
+vignetteFolder.add(state, "vignetteSoftness", 0, 1, 0.01).name("柔化").onChange(applyVignetteParams);
+vignetteFolder.close();
+addButtons(gui, "操作", {
+  重置默认: () => {
+    state.post = true;
+    state.bloom = true;
+    state.vignette = true;
+    state.tonemap = "aces";
+    state.threshold = 0.65;
+    state.strength = 1.1;
+    state.radius = 2.2;
+    state.bloomScale = 0.5;
+    state.exposure = 1.15;
+    state.vignetteStrength = 0.45;
+    state.vignetteSoftness = 0.7;
+    state.msaa = 4;
+    rebuildBloom();
+    applyMsaa();
+    applyTonemapParams();
+    applyVignetteParams();
+    applyState();
+    syncControllers();
+  },
+});
 
 // ---- HUD ---------------------------------------------------------------
 const hud = document.createElement("div");
@@ -142,7 +274,7 @@ function updateHud(): void {
     `效果链   : ${composer.passList.map((p) => p.name).join(" → ") || "(空)"}\n` +
     `泛光     : ${state.bloom ? "开" : "关"}  阈值 ${bloom.threshold} 强度 ${bloom.strength}\n` +
     `色调映射 : ${state.tonemap}  曝光 ${tonemap.exposure}\n` +
-    `keys     : B 泛光 · T 色调映射 · V 暗角 · M MSAA · P 后处理链开关`;
+    `面板      : 右上角 lil-gui 可调（?gui=0 关闭）`;
 }
 
 const input = new InputManager(canvas, { preventWheelDefault: true });
@@ -154,21 +286,14 @@ input.on("keydown", (e) => {
     const modes: ToneMappingMode[] = ["aces", "reinhard", "linear", "none"];
     state.tonemap = modes[(modes.indexOf(state.tonemap) + 1) % modes.length]!;
   } else if (e.code === "KeyM") {
-    msaa = (device.limits.maxSamples ?? 1) > 1 ? (msaa === 4 ? 1 : 4) : 1;
-    rebuildComposer();
+    state.msaa = msaa === 4 ? 1 : 4;
+    applyMsaa();
   } else return;
   applyState();
+  // 快捷键与面板是同一份 state：改完把面板显示同步过来
+  syncControllers();
   updateHud();
 });
-
-let composerMsaa = msaa;
-function rebuildComposer(): void {
-  if (msaa === composerMsaa) return;
-  composerMsaa = msaa;
-  // 只换场景目标的采样数：链路内部目标与效果实例保持复用。
-  // 材质会按附件的采样数自动取到匹配的管线（Multisample），无需手动重建。
-  composer.setSampleCount(msaa);
-}
 
 // ---- 自检 --------------------------------------------------------------
 const selfTest = params.get("selftest") !== "0";

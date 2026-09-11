@@ -1,6 +1,6 @@
 import type { Device } from "../device/Device.js";
 import type { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline } from "../device/resources.js";
-import type { BindGroupEntryDescriptor, BindGroupLayoutEntryDescriptor } from "../device/descriptors.js";
+import type { BindGroupEntryDescriptor, BindGroupLayoutEntryDescriptor, BlendStateDescriptor } from "../device/descriptors.js";
 import type { TextureFormat } from "../gpu/types.js";
 import type { RenderPassEncoder } from "../command/encoder.js";
 import type { Vec3 } from "../math/vec3.js";
@@ -40,8 +40,22 @@ export interface MaterialOptions {
   cullMode?: "none" | "front" | "back";
   /** 与深度附件匹配的深度格式（默认 depth24plus） */
   depthFormat?: TextureFormat;
-  /** 启用标准 alpha 混合（半透明） */
+  /** 启用标准 alpha 混合（半透明：src-alpha / one-minus-src-alpha） */
   alphaBlend?: boolean;
+  /**
+   * 自定义混合状态（颜色与 alpha 各一份 src/dst factor + operation）。
+   *
+   * 设置后不必再开 `alphaBlend`；材质会被标记为**半透明**（`isTransparent`），
+   * `SceneRenderer` 会把它排在不透明物体之后并按距离**远→近**绘制。
+   */
+  blend?: BlendStateDescriptor;
+  /**
+   * 是否写深度（默认 true）。
+   *
+   * 半透明物体通常设 `false`：不写深度就不会挡住后面的半透明物体，
+   * 但仍参与深度测试（会被不透明物体正确遮挡）。
+   */
+  depthWrite?: boolean;
   /**
    * 只写深度（阴影贴图等）：管线不带颜色附件。
    *
@@ -166,14 +180,18 @@ export abstract class BaseMaterial {
       depthStencil:
         depth === false
           ? null
-          : { format: depthFormatOf(this.device, this._opts), depthWriteEnabled: true, depthCompare: "less-equal" },
+          : {
+              format: depthFormatOf(this.device, this._opts),
+              depthWriteEnabled: this._opts.depthWrite !== false,
+              depthCompare: "less-equal",
+            },
       targets: depthOnly
         ? []
         : [
             {
               format: targetFormat,
               writeMask: ColorWriteMask.ALL,
-              blend: this._opts.alphaBlend ? defaultBlendState() : undefined,
+              blend: this._resolveBlend(),
             },
           ],
       multisample: { count: sampleCount },
@@ -353,6 +371,21 @@ export abstract class BaseMaterial {
    */
   protected extraDynamicOffsets(_slot: number): readonly number[] {
     return EMPTY_OFFSETS;
+  }
+
+  /**
+   * 材质是否半透明（`alphaBlend` 或自定义 `blend` 都算）。
+   *
+   * `SceneRenderer` 用它决定排序：不透明物体近→远（利于 early-z），
+   * 半透明物体远→近（正确的叠加顺序）。
+   */
+  get isTransparent(): boolean {
+    return this._opts.alphaBlend === true || this._opts.blend !== undefined;
+  }
+
+  /** 管线的混合状态：自定义 `blend` 优先，其次 `alphaBlend` 的标准混合 */
+  private _resolveBlend(): BlendStateDescriptor | undefined {
+    return this._opts.blend ?? (this._opts.alphaBlend ? defaultBlendState() : undefined);
   }
 
   /** 绘制一个 mesh。 */

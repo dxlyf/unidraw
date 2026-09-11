@@ -7,6 +7,8 @@
  *   `HighlightPlugin`（GPU 拾取高亮/选中），以及示例内自定义的 `HudPlugin`
  *   （演示 `setup/update/beforeRender/afterRender/resize/dispose` 全生命周期）；
  * - 动画：`AnimationClip` + `Mixer`（自转）与 `Tween`（点击弹出）；
+ * - 右上角 lil-gui 面板（`?gui=0` 关掉）可实时改：相机自动旋转/视场角、拾取高亮开关与颜色、
+ *   HUD 显示、动画与补间开关、清屏色；键盘快捷键是面板的别名；
  * - `?selftest=1`（默认开）：停表 → 用固定时间步跑若干帧 → 打印 APP_SELFTEST
  *   （无头双后端验证用）。
  */
@@ -21,6 +23,7 @@ import { ColorMaterial, UnlitColorMaterial } from "../../src/render/material.js"
 import { Mesh } from "../../src/render/Mesh.js";
 import { Color } from "../../src/math/color.js";
 import { Vec3 } from "../../src/math/vec3.js";
+import { degToRad } from "../../src/math/mmath.js";
 import {
   AnimationClip,
   nodeRotationTrack,
@@ -31,6 +34,7 @@ import {
 } from "../../src/animation/index.js";
 import type { TextureFormat } from "../../src/gpu/types.js";
 import { TextureUsage } from "../../src/gpu/types.js";
+import { addButtons, applyUrlOverrides, createGui } from "../common/gui.js";
 
 interface Item {
   mesh: Mesh;
@@ -48,7 +52,7 @@ const hudPlugin = definePlugin({
     const el = document.createElement("div");
     el.id = "app-hud";
     el.style.cssText =
-      "position:fixed;right:12px;top:12px;color:#d7d9e0;font:12px/1.6 ui-monospace,Consolas,monospace;" +
+      "position:fixed;left:12px;top:12px;color:#d7d9e0;font:12px/1.6 ui-monospace,Consolas,monospace;" +
       "background:rgba(16,18,26,.72);border:1px solid #2b3040;border-radius:8px;padding:10px 12px;z-index:20;white-space:pre;pointer-events:none";
     document.body.appendChild(el);
     pluginEl = el;
@@ -61,7 +65,7 @@ const hudPlugin = definePlugin({
     hudLines[2] = `scene   : objects=${appRef!.stats.objects}  drawn=${appRef!.stats.drawn}  culled=${appRef!.stats.culled}  tris=${appRef!.stats.triangles}`;
     hudLines[3] = `anim    : ${appRef!.mixer.activeClipNames.join(", ") || "(none)"}  tweens=${appRef!.tweens.count}`;
     hudLines[4] = `plugins : ${appRef!.plugins.map((p) => p.name ?? "?").join(", ")}`;
-    hudLines[5] = `交互    : 拖拽旋转 · 滚轮缩放 · 悬停/点击物体高亮`;
+    hudLines[5] = `面板    : 右上角 lil-gui 可调（?gui=0 关面板） · 拖拽旋转 · 滚轮缩放 · 悬停/点击高亮`;
     if (pluginEl) pluginEl.textContent = hudLines.join("\n");
   },
   resize(_ctx, w, h) {
@@ -162,7 +166,7 @@ app.mixer.play(idle, { loop: "ping-pong" });
 // 纯 Tween：呼吸的地面颜色
 const floorColor = new Color(0.09, 0.1, 0.14, 1);
 const floorMat = floor.material as UnlitColorMaterial;
-app.tweens.add(
+const floorTween = app.tweens.add(
   tweenNumber(
     0,
     1,
@@ -175,17 +179,41 @@ app.tweens.add(
   ),
 );
 
+// ---- 参数（URL 可覆盖；GUI 实时改） ------------------------------------------
+const state = {
+  /** 相机自动旋转（默认关，保持画面与无头回归的确定性） */
+  autoRotate: false,
+  cameraSpeed: 0.12,
+  /** 视场角（度） */
+  fov: 60,
+  /** 拾取高亮总开关（悬停 + 点击） */
+  pick: true,
+  /** 选中后是否 Tween 弹一下 */
+  selectPop: true,
+  highlightColor: "#ffe066",
+  /** idle 动画播放 + 速度 */
+  animating: true,
+  animSpeed: 1,
+  /** 地面呼吸补间 */
+  floorTween: true,
+  showHud: true,
+  /** 清屏色 */
+  background: "#0d1017",
+};
+applyUrlOverrides(state, params);
+
 // ---- 插件 ----------------------------------------------------------------
 const orbit = new OrbitControlsPlugin();
-const highlightMat = new UnlitColorMaterial(app.device, new Color().setHex("#ffe066"), {
+const highlightMat = new UnlitColorMaterial(app.device, new Color().setHex(state.highlightColor), {
   label: "highlight",
   targetFormat,
 });
 const highlight = new HighlightPlugin({
   highlight: highlightMat,
-  // 拖动相机时不拾取（否则高亮会跟着旧位置闪）
-  skipWhileDragging: () => orbit.dragging,
+  // 拖动相机时不拾取（否则高亮会跟着旧位置闪）；面板关掉拾取时也走同一条短路
+  skipWhileDragging: () => orbit.dragging || !state.pick,
   onSelect: (mesh) => {
+    if (!state.selectPop) return;
     const item = items.find((it) => it.mesh === mesh);
     if (!item) return;
     // 选中 → Tween 弹一下
@@ -206,7 +234,7 @@ await app.useAsync(highlight);
 // ?hud=0 时不注册 HUD 插件（便于只看画布 / 截图对比）
 if (params.get("hud") !== "0") await app.useAsync(hudPlugin);
 
-app.camera.setPerspective(Math.PI / 3, canvas.width / canvas.height, 0.1, 500);
+app.camera.setPerspective(degToRad(state.fov), canvas.width / canvas.height, 0.1, 500);
 app.camera.center.set(0, 0.7, 0);
 app.camera.distance = 8.2;
 // 注意：pitch 为正 = 相机在目标「上方」（俯视）；负值会让相机钻到地板下面
@@ -214,12 +242,123 @@ app.camera.yaw = 0.35;
 app.camera.pitch = 0.34;
 app.camera.update();
 
+// ---- 参数面板（lil-gui） ----------------------------------------------------
+function applyAnimation(): void {
+  app.mixer.timeScale = state.animating ? state.animSpeed : 0;
+}
+
+// 补间播完会被 TweenManager 自动移除，所以「关」= 移除 + 停止，「开」= 重新加入并从头播
+let floorTweenAdded = true;
+function applyFloorTween(): void {
+  if (state.floorTween === floorTweenAdded) return;
+  if (state.floorTween) {
+    floorTween.reset();
+    app.tweens.add(floorTween);
+  } else {
+    app.tweens.remove(floorTween);
+    floorTween.stop();
+  }
+  floorTweenAdded = state.floorTween;
+}
+
+function applyFov(): void {
+  app.camera.setPerspective(degToRad(state.fov), app.camera.aspect, 0.1, 500);
+  app.camera.update();
+}
+
+function applyHighlightColor(): void {
+  highlightMat.setColor(new Color().setHex(state.highlightColor));
+}
+
+function applyHud(): void {
+  // ?hud=0 时插件没注册，pluginEl 为 null —— 面板控件此时是空操作
+  if (pluginEl) pluginEl.style.display = state.showHud ? "" : "none";
+}
+
+function applyPick(): void {
+  // 关掉拾取时把已选中的高亮恢复成原材质（悬停高亮会在指针离开时自动清）
+  if (!state.pick) highlight.clearSelection();
+}
+
+function applyBackground(): void {
+  app.setClear(state.background);
+}
+
+function resetView(): void {
+  app.camera.center.set(0, 0.7, 0);
+  app.camera.distance = 8.2;
+  app.camera.yaw = 0.35;
+  app.camera.pitch = 0.34;
+  app.camera.update();
+}
+
+function syncControllers(): void {
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+}
+
+const gui = createGui({ title: "App 门面 · 插件与参数", params });
+
+const camFolder = gui.addFolder("相机");
+camFolder.add(state, "autoRotate").name("自动旋转");
+camFolder.add(state, "cameraSpeed", 0, 0.5, 0.01).name("旋转速度");
+camFolder.add(state, "fov", 25, 100, 1).name("视场角 FOV").onChange(applyFov);
+
+const pickFolder = gui.addFolder("拾取 / 高亮");
+pickFolder.add(state, "pick").name("拾取高亮").onChange(applyPick);
+pickFolder.add(state, "selectPop").name("选中弹出 Tween");
+pickFolder.addColor(state, "highlightColor").name("高亮颜色").onChange(applyHighlightColor);
+
+const animFolder = gui.addFolder("动画 / 补间");
+animFolder.add(state, "animating").name("播放 idle 动画").onChange(applyAnimation);
+animFolder.add(state, "animSpeed", 0, 2, 0.05).name("动画速度").onChange(applyAnimation);
+animFolder.add(state, "floorTween").name("地面呼吸补间").onChange(applyFloorTween);
+animFolder.close();
+
+const viewFolder = gui.addFolder("显示");
+viewFolder.add(state, "showHud").name("显示 HUD").onChange(applyHud);
+viewFolder.addColor(state, "background").name("清屏色").onChange(applyBackground);
+viewFolder.close();
+
+addButtons(gui, "操作", {
+  重置视角: resetView,
+  清除选中: () => highlight.clearSelection(),
+});
+
+// 键盘快捷键（面板的别名）：Space 动画开关 · R 重置视角 · H HUD · P 拾取
+app.input?.on("keydown", (e) => {
+  if (e.code === "Space") {
+    state.animating = !state.animating;
+    applyAnimation();
+  } else if (e.code === "KeyR") {
+    resetView();
+  } else if (e.code === "KeyH") {
+    state.showHud = !state.showHud;
+    applyHud();
+  } else if (e.code === "KeyP") {
+    state.pick = !state.pick;
+    applyPick();
+  } else {
+    return;
+  }
+  syncControllers();
+});
+
+// 让 URL 覆盖（?animating=0 / ?floorTween=0 / ?showHud=0 / ?background=…）同样生效
+applyAnimation();
+applyFloorTween();
+applyHud();
+applyBackground();
+
 // ---- 自检 ----------------------------------------------------------------
 let frames = 0;
 let tested = false;
-app.onRender(() => {
+app.onRender((_pass, dt) => {
   frames++;
   status.frames = frames;
+  if (state.autoRotate) {
+    app.camera.yaw += dt * state.cameraSpeed;
+    app.camera.update();
+  }
   if (frames === 24) app.resize(400, 250);
   if (selfTest && !tested && frames === 40) {
     tested = true;

@@ -95,6 +95,24 @@ const status = await evalJs(
    })`,
 );
 const rawErr = await evalJs(`document.querySelector('#err')?.textContent ?? ""`);
+// lil-gui 面板体检（示例参数面板）：标题 + 控制器数量 + 是否可见
+const guiInfo = await evalJs(
+  `JSON.stringify((() => {
+     const panels = [...document.querySelectorAll('.lil-gui')];
+     const root = panels.find((el) => el.parentElement === document.body) ?? panels[0];
+     if (!root) return { present: false, body: [...document.body.children].map((el) => el.className || el.tagName).join('|') };
+     const style = getComputedStyle(root);
+     return {
+       present: true,
+       title: root.querySelector(':scope > .title')?.textContent ?? "",
+       controllers: document.querySelectorAll('.lil-controller').length,
+       folders: Math.max(0, panels.length - 1),
+       closed: root.classList.contains('closed'),
+       visible: style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0,
+       rect: (({ x, y, width, height }) => [Math.round(x), Math.round(y), Math.round(width), Math.round(height)])(root.getBoundingClientRect()),
+     };
+   })())`,
+);
 const rawBackend = await evalJs(`document.querySelector('#backend')?.textContent ?? ""`);
 const gpuInfo = await evalJs(
   `JSON.stringify({
@@ -114,6 +132,11 @@ console.log("STATUS:", status);
 console.log("RAW_ERR:", rawErr || "(empty)");
 console.log("RAW_BACKEND:", rawBackend || "(empty)");
 console.log("GPU:", gpuInfo);
+console.log("GUI:", guiInfo);
+if (process.env.DEBUG_EVAL) {
+  const value = await evalJs(process.env.DEBUG_EVAL);
+  console.log("EVAL:", typeof value === "string" ? value : JSON.stringify(value));
+}
 console.log("CONSOLE:");
 console.log(consoleLines.slice(0, 40).join("\n") || "(none)");
 console.log("SHOT:", b64 ? `${outPng} (${(b64.length * 0.75).toFixed(0)}B)` : "failed");

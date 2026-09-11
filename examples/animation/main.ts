@@ -5,7 +5,9 @@
  *   （世界矩阵由脏标记自动传播）；
  * - 关键帧：`bouncer-hop` = 位置(回弹) + 缩放(squash) 两条轨道；
  *   `hero-paint` = 材质颜色轨道；`hero-spin` = 旋转轨道（ping-pong）；
- * - Mixer：循环模式 / 时间缩放 / 暂停都能用键盘切换；
+ * - Mixer：循环模式 / 时间缩放 / 暂停都能用键盘切换；右上角 lil-gui 面板（`?gui=0` 关掉）
+ *   也能改同样的参数（外加各个 clip 的开关、相机自动旋转、呼吸补间、点击弹出缩放），
+ *   键盘快捷键保留为面板的别名；
  * - Tween：点击物体 → 弹出缩放 + 位移（`tweenObject` / `tweenVec3` / `tweenNumber`）；
  * - `?selftest=1`（默认开）：用固定时间步跑一遍动画，在控制台打印 ANIM_SELFTEST
  *   （用于无头双后端验证）。
@@ -36,8 +38,10 @@ import {
   tweenObject,
   tweenVec3,
   vec3Keys,
+  type AnimationAction,
   type LoopMode,
 } from "../../src/animation/index.js";
+import { addButtons, applyUrlOverrides, createGui } from "../common/gui.js";
 
 interface Item {
   mesh: Mesh;
@@ -158,9 +162,9 @@ bootDemo({
     const mixer = new AnimationMixer(scene);
     const tweens = new TweenManager();
 
-    mixer.play(carouselSpin, { loop: "repeat" });
-    mixer.play(bouncerHop, { loop: "repeat" });
-    mixer.play(heroPaint, { loop: "repeat" });
+    const carouselAction = mixer.play(carouselSpin, { loop: "repeat" });
+    const bouncerAction = mixer.play(bouncerHop, { loop: "repeat" });
+    const heroPaintAction = mixer.play(heroPaint, { loop: "repeat" });
     const heroSpinAction = mixer.play(heroSpin, { loop: "ping-pong" });
 
     // 纯 Tween 驱动的“呼吸”灯（不写关键帧）
@@ -170,7 +174,7 @@ bootDemo({
     breathLight.setPosition(-2.6, 0.2, -2.6);
     scene.add(breathLight);
     const breathColor = new Color(1, 0.56, 0.23, 1);
-    tweens.add(
+    const breathTween = tweens.add(
       tweenNumber(
         0,
         1,
@@ -189,14 +193,76 @@ bootDemo({
     const picker = new ColorPicker(device, { label: "anim-pick" });
     const input = new InputManager(canvas, { preventWheelDefault: true });
 
+    const params = new URLSearchParams(location.search);
+
+    // ---- 参数（URL 可覆盖；GUI 实时改） --------------------------------------
+    const state = {
+      paused: false,
+      timeScale: 1,
+      loopMode: "repeat" as LoopMode,
+      autoRotate: true,
+      cameraSpeed: 0.08,
+      clipCarousel: true,
+      clipBouncer: true,
+      clipHeroPaint: true,
+      clipHeroSpin: true,
+      breath: true,
+      popScale: 1.7,
+    };
+    applyUrlOverrides(state, params);
+
+    function setAction(action: AnimationAction, on: boolean): void {
+      if (on) {
+        if (!action.running) action.play();
+      } else {
+        action.stop();
+      }
+    }
+
+    function applyMixer(): void {
+      mixer.timeScale = state.paused ? 0 : state.timeScale;
+    }
+
+    function applyLoopMode(): void {
+      for (const a of mixer.actions) a.loop = state.loopMode;
+      if (state.loopMode === "once") for (const a of mixer.actions) a.restart();
+    }
+
+    function applyClips(): void {
+      setAction(carouselAction, state.clipCarousel);
+      setAction(bouncerAction, state.clipBouncer);
+      setAction(heroPaintAction, state.clipHeroPaint);
+      setAction(heroSpinAction, state.clipHeroSpin);
+    }
+
+    // 补间一旦播完会被 TweenManager 自动移除，所以「关」= 移除 + 停止，「开」= 重新加入并从头播
+    let breathAdded = true;
+    function applyBreath(): void {
+      if (state.breath === breathAdded) return;
+      if (state.breath) {
+        breathTween.reset();
+        tweens.add(breathTween);
+      } else {
+        tweens.remove(breathTween);
+        breathTween.stop();
+      }
+      breathAdded = state.breath;
+    }
+
+    applyMixer();
+    applyClips();
+    applyBreath();
+
+    // HUD 固定在左上角（公共标题之下），右上角留给 lil-gui 面板
+    const bootHud = document.querySelector<HTMLElement>(".hud");
+    const hudTop = bootHud ? Math.round(bootHud.getBoundingClientRect().bottom + 8) : 12;
     const hud = document.createElement("div");
     hud.id = "anim-hud";
     hud.style.cssText =
-      "position:fixed;right:12px;top:12px;color:#d7d9e0;font:12px/1.6 ui-monospace,Consolas,monospace;" +
+      `position:fixed;left:12px;top:${hudTop}px;color:#d7d9e0;font:12px/1.6 ui-monospace,Consolas,monospace;` +
       "background:rgba(16,18,26,.72);border:1px solid #2b3040;border-radius:8px;padding:10px 12px;z-index:20;white-space:pre;pointer-events:none";
     document.body.appendChild(hud);
 
-    let loopMode: LoopMode = "repeat";
     let clicks = 0;
 
     function popItem(item: Item): void {
@@ -213,7 +279,7 @@ bootDemo({
         ),
       );
       tweens.add(
-        tweenObject(item.mesh.scale, { x: 1.7, y: 1.7, z: 1.7 }, 0.16, {
+        tweenObject(item.mesh.scale, { x: state.popScale, y: state.popScale, z: state.popScale }, 0.16, {
           easing: "quadOut",
           yoyo: true,
           repeat: 1,
@@ -221,6 +287,63 @@ bootDemo({
         }),
       );
     }
+
+    function popAll(): void {
+      for (const it of items) popItem(it);
+    }
+
+    function syncControllers(): void {
+      gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    }
+
+    // ---- 参数面板（lil-gui） --------------------------------------------------
+    const gui = createGui({ title: "动画（关键帧 / Mixer / Tween）", params });
+    const mixerFolder = gui.addFolder("播放控制");
+    mixerFolder.add(state, "paused").name("暂停").onChange(applyMixer);
+    mixerFolder.add(state, "timeScale", 0, 2, 0.05).name("时间缩放").onChange(applyMixer);
+    mixerFolder
+      .add(state, "loopMode", { 循环: "repeat", 往返: "ping-pong", 单次: "once" })
+      .name("循环模式")
+      .onChange(applyLoopMode);
+
+    const clipFolder = gui.addFolder("片段（clip）");
+    clipFolder.add(state, "clipCarousel").name("轨道自转 carousel").onChange(applyClips);
+    clipFolder.add(state, "clipBouncer").name("弹跳 bouncer").onChange(applyClips);
+    clipFolder.add(state, "clipHeroPaint").name("英雄变色 paint").onChange(applyClips);
+    clipFolder.add(state, "clipHeroSpin").name("英雄自转 spin").onChange(applyClips);
+
+    const tweenFolder = gui.addFolder("补间（Tween）");
+    tweenFolder.add(state, "breath").name("呼吸灯").onChange(applyBreath);
+    tweenFolder.add(state, "popScale", 1, 3, 0.05).name("点击弹出缩放");
+    tweenFolder.close();
+
+    const camFolder = gui.addFolder("相机");
+    camFolder.add(state, "autoRotate").name("自动旋转");
+    camFolder.add(state, "cameraSpeed", 0, 0.4, 0.005).name("旋转速度");
+    camFolder.close();
+
+    addButtons(gui, "操作", {
+      全部弹出: popAll,
+      重置参数: () => {
+        state.paused = false;
+        state.timeScale = 1;
+        state.loopMode = "repeat";
+        state.autoRotate = true;
+        state.cameraSpeed = 0.08;
+        state.clipCarousel = state.clipBouncer = state.clipHeroPaint = state.clipHeroSpin = true;
+        state.breath = true;
+        state.popScale = 1.7;
+        applyMixer();
+        applyLoopMode();
+        applyClips();
+        applyBreath();
+        syncControllers();
+      },
+    });
+
+    // 底部提示补一句面板开关（HUD 已在左上角写了同一件事）
+    const hint = document.querySelector<HTMLElement>(".hint");
+    if (hint) hint.textContent += " · ?gui=0 关面板";
 
     input.on("click", (e) => {
       void picker
@@ -231,32 +354,46 @@ bootDemo({
         })
         .catch(() => {});
     });
+    // 快捷键保留为面板的别名；改完必须回写控件显示，面板才不会和实际状态脱节
     input.on("keydown", (e) => {
-      if (e.code === "Space") mixer.timeScale = mixer.timeScale === 0 ? 1 : 0;
-      else if (e.code === "Digit1") mixer.timeScale = 0.25;
-      else if (e.code === "Digit2") mixer.timeScale = 1;
-      else if (e.code === "Digit3") mixer.timeScale = 2;
-      else if (e.code === "KeyL") {
+      if (e.code === "Space") {
+        state.paused = !state.paused;
+        applyMixer();
+      } else if (e.code === "Digit1") {
+        state.timeScale = 0.25;
+        state.paused = false;
+        applyMixer();
+      } else if (e.code === "Digit2") {
+        state.timeScale = 1;
+        state.paused = false;
+        applyMixer();
+      } else if (e.code === "Digit3") {
+        state.timeScale = 2;
+        state.paused = false;
+        applyMixer();
+      } else if (e.code === "KeyL") {
         const modes: LoopMode[] = ["repeat", "ping-pong", "once"];
-        loopMode = modes[(modes.indexOf(loopMode) + 1) % modes.length]!;
-        for (const a of mixer.actions) a.loop = loopMode;
-        if (loopMode === "once") for (const a of mixer.actions) a.restart();
+        state.loopMode = modes[(modes.indexOf(state.loopMode) + 1) % modes.length]!;
+        applyLoopMode();
       } else if (e.code === "KeyT") {
-        for (const it of items) popItem(it);
+        popAll();
+      } else {
+        return;
       }
+      syncControllers();
     });
 
     function updateHud(): void {
       hud.textContent =
         `backend : ${device.kind}\n` +
-        `mixer   : t=${mixer.elapsed.toFixed(2)}s  scale=${mixer.timeScale}  loop=${loopMode}\n` +
+        `mixer   : t=${mixer.elapsed.toFixed(2)}s  scale=${mixer.timeScale}  loop=${state.loopMode}\n` +
         `clips   : ${mixer.activeClipNames.join(", ") || "(none)"}\n` +
         `tweens  : ${tweens.count}   点击次数: ${clicks}\n` +
-        `keys    : Space 暂停 · 1/2/3 速度 · L 循环模式 · T 全部弹出`;
+        `面板    : 右上角 lil-gui 可调（?gui=0 关面板 · ?gui=closed 默认收起）`;
     }
 
     // ---- 自检（无头探针） ---------------------------------------------------
-    const selfTest = new URLSearchParams(location.search).get("selftest") !== "0";
+    const selfTest = params.get("selftest") !== "0";
     let selfTested = false;
     let freeze = false;
 
@@ -337,7 +474,7 @@ bootDemo({
       frame(pass, c) {
         frames++;
         c.camera.center.set(0, 1.2, 0);
-        if (!freeze) c.camera.yaw += c.dt * 0.08;
+        if (!freeze && state.autoRotate) c.camera.yaw += c.dt * state.cameraSpeed;
         c.camera.update();
 
         if (!freeze) {

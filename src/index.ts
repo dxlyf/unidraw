@@ -33,6 +33,7 @@ export * from "./render/RenderTarget.js";
 export * from "./render/postfx/index.js";
 export * from "./render/shadow/index.js";
 export * from "./render/Mesh.js";
+export * from "./render/blendModes.js";
 export * from "./render/InstancedMesh.js";
 export * from "./render/texture.js";
 export * from "./render/Camera.js";
