@@ -48,7 +48,10 @@ function blend(
 
 /** 可用的合成模式 → 硬件混合状态（未列出的模式不支持，运行时告警并回退 source-over） */
 export const COMPOSITE_BLENDS: Record<string, CompositeBlend> = {
-  "source-over": blend("one", "one-minus-src-alpha", "one", "one-minus-src-alpha"),
+  // 注意：片元输出是**直通 alpha**（非预乘），所以源颜色因子必须是 src-alpha。
+  // 上表的 Porter-Duff 推导是在预乘空间做的，只有这一项（默认模式）需要按直通语义写回，
+  // 否则所有半透明/抗锯齿像素都会偏亮。
+  "source-over": blend("src-alpha", "one-minus-src-alpha", "one", "one-minus-src-alpha"),
   "destination-over": blend("one-minus-dst-alpha", "one", "one-minus-dst-alpha", "one"),
   "source-in": blend("dst-alpha", "zero", "dst-alpha", "zero", true),
   "destination-in": blend("zero", "src-alpha", "zero", "src-alpha", true),
