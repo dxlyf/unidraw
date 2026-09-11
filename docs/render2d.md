@@ -102,6 +102,17 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
   对齐点/基线**的偏移（`offsetX/offsetY`），不是直接当坐标用；
 - `maxWidth` 通过横向压缩四边形实现（视觉等价于原生压缩字距）。
 
+### 图片
+- `drawImage(source, dx, dy)` / `(source, dx, dy, dw, dh)` /
+  `(source, sx, sy, sw, sh, dx, dy, dw, dh)`（三种重载与原生一致）；
+- 源可以是任意 `CanvasImageSource`（`Image` / `ImageBitmap` / `HTMLCanvasElement` /
+  `ImageData`…），经 `textureFromImageSource` 采样为纹理并**按源对象缓存**
+  （同一个 img/canvas 反复绘制只上传一次；源内容变了调用 `invalidateImage(source)`）；
+- 绘制走纹理四边形 + `globalAlpha` + 当前合成模式，与 `fillStyle` 无关（与原生一致）；
+- 缩放使用双线性采样：**轴对齐的 1:1 / 缩放 / 裁剪缩放逐像素与原生一致**；
+  旋转后原生用更高质量的重建滤波（Skia），本实现是双线性，会有可见差异
+  （对照实测旋转分区平均差 ≈ 9.6/255）。
+
 ### 合成模式
 - `globalCompositeOperation`（随 `save/restore` 压栈）。**已支持**（全部是硬件混合状态，
   单 pass 完成，不需要把目标读成纹理）：
@@ -143,8 +154,8 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
   半透明粗描边在接头处会比原生略深；
 - 圆角 join 用扇形逼近；
 - 字形纹理在 DPR>1 时以设备像素栅格化（缩小绘制可能略糊，可后续按 DPR 缓存）；
-- 尚未支持：`shadowBlur`、`drawImage`/`createPattern`，以及需要「目标作为纹理」的
-  合成模式（`overlay` / `difference` / `hue` 等 11 种）。
+- 尚未支持：`shadowBlur`（需要离屏模糊）、`createPattern`（图案填充），
+  以及需要「目标作为纹理」的合成模式（`overlay` / `difference` / `hue` 等 11 种）。
 
 ## 与原生的差距（量化）
 
@@ -170,7 +181,9 @@ nonzero 反向挖洞 / 自相交五角星），整幅平均差 ≈ 0.10，各分
 其中虚线 0.18、textAlign 0.60、strokeText 0.49、textBaseline 1.91；
 `?scene=composite` 验证 14 种合成模式：9 种 Porter-Duff 模式**逐像素完全一致（0.00）**，
 `copy` / `multiply` / `screen` / `darken` / `lighten` 平均差 3~5（圆边抗锯齿与
-半透明混合的近似）。
+半透明混合的近似）；
+`?scene=image` 验证 `drawImage` 的三种重载 + 旋转 + 透明：轴对齐的 1:1 / 缩放 /
+裁剪缩放 / 缩小平铺均为 **0.00**，只有旋转采样平均差 ≈ 9.6（滤波核差异）。
 
 继续排查时应先看这张表：哪个区域掉下去，就说明对应图元的求值/栅格化方式跑偏了。
 

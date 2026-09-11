@@ -58,6 +58,7 @@ interface SceneCtx {
   textAlign: string;
   textBaseline: string;
   globalCompositeOperation: string;
+  drawImage(source: unknown, ...args: number[]): void;
   save(): void;
   restore(): void;
   translate(x: number, y: number): void;
@@ -267,6 +268,67 @@ function drawTextDash(c: SceneCtx): void {
   c.lineTo(456, 264);
   c.stroke();
   void w;
+}
+
+/** drawImage 场景：源图由离屏 2D 画布程序化生成（不依赖外部资源） */
+const IMAGE_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "1:1 原图", x: 12, y: 12, w: 150, h: 120 },
+  { name: "缩放", x: 170, y: 12, w: 150, h: 120 },
+  { name: "裁剪缩放", x: 328, y: 12, w: 144, h: 120 },
+  { name: "旋转透明度", x: 12, y: 146, w: 306, h: 114 },
+  { name: "缩小平铺", x: 328, y: 146, w: 144, h: 114 },
+];
+
+function makeSourceImage(): HTMLCanvasElement {
+  const cv = document.createElement("canvas");
+  cv.width = 96;
+  cv.height = 64;
+  const g = cv.getContext("2d")!;
+  const grad = g.createLinearGradient(0, 0, 96, 0);
+  grad.addColorStop(0, "#ff5c7a");
+  grad.addColorStop(0.5, "#f5d02e");
+  grad.addColorStop(1, "#35d7ee");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 96, 64);
+  g.fillStyle = "#101826";
+  g.beginPath();
+  g.arc(30, 32, 16, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = "#ffffff";
+  g.fillRect(56, 12, 28, 40);
+  g.fillStyle = "#3dd68c";
+  g.beginPath();
+  g.moveTo(0, 64);
+  g.lineTo(20, 40);
+  g.lineTo(40, 64);
+  g.closePath();
+  g.fill();
+  return cv;
+}
+
+function drawImages(c: SceneCtx): void {
+  const img = makeSourceImage();
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  c.drawImage(img, 20, 20); // 1:1
+  c.drawImage(img, 186, 20, 110, 90); // 缩放
+  c.drawImage(img, 0, 0, 48, 32, 344, 24, 112, 74); // 裁剪 + 缩放
+
+  // 旋转 + 透明度
+  c.save();
+  c.globalAlpha = 0.65;
+  c.translate(160, 200);
+  c.rotate(0.35);
+  c.drawImage(img, -48, -32, 96, 64);
+  c.restore();
+
+  // 缩小平铺（同一张图反复绘制）
+  c.save();
+  for (let ty = 0; ty < 3; ty++) {
+    for (let tx = 0; tx < 8; tx++) c.drawImage(img, 336 + tx * 8, 152 + ty * 8, 8, 8);
+  }
+  c.restore();
 }
 
 /** 合成模式场景：每个模式一块「底图 + 叠加形状」，与原生逐块对照 */
@@ -483,6 +545,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   fillrules: { label: "填充规则", draw: (c) => drawFillRules(c), regions: FILL_REGIONS },
   extras: { label: "虚线/文字API", draw: (c) => drawTextDash(c), regions: EXTRAS_REGIONS },
   composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
+  image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
 };
 const sceneId = params.get("scene") ?? "parity";
 const scene = SCENES[sceneId] ?? SCENES.parity!;

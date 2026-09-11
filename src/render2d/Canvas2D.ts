@@ -17,6 +17,7 @@ import { fillTriangles, type FillRule } from "./fill.js";
 import type { Contour } from "./pathTypes.js";
 import { blendForComposite } from "./composite.js";
 import { logger } from "../util/logger.js";
+import { sourceSize, textureFromImageSource, type CanvasImageSourceLike } from "../render/texture/image.js";
 import type { Pt2 } from "./matrix.js";
 import { identityAffine, copyAffine, multiplyAffine, transformPoint } from "./matrix.js";
 import { FLAT_FS_GLSL, FLAT_VS_GLSL, FLAT_WGSL, TEX_FS_GLSL, TEX_VS_GLSL, TEX_WGSL } from "./shaders.js";
@@ -89,6 +90,8 @@ export class Canvas2D {
   private paint: ResolvedPaint = SOLID_PAINT;
   /** 已告警过的不支持合成模式（每种只提醒一次） */
   private readonly warnedComposite = new Set<string>();
+  /** 图像源 → 纹理缓存（同一个 img/canvas 反复绘制只上传一次） */
+  private readonly imageTextures = new WeakMap<object, Texture>();
 
   private viewW = 1;
   private viewH = 1;
@@ -1060,6 +1063,89 @@ export class Canvas2D {
     }
     const rect: DeviceRect = { x: r[0], y: r[1], w: r[2], h: r[3] };
     this.state.clip = this.state.clip ? intersectRects(this.state.clip, rect) : rect;
+    return this;
+  }
+
+  // ======================================================================
+  // 图片
+  // ======================================================================
+
+  /**
+   * 取图像源对应的纹理（按对象缓存；同一个 canvas/img 反复绘制只上传一次）。
+   *
+   * 注意：源内容变化后不会自动失效 —— 需要重新上传时调用 `invalidateImage(source)`。
+   */
+  private textureFor(source: CanvasImageSourceLike): Texture {
+    const cached = this.imageTextures.get(source as object);
+    if (cached) return cached;
+    const tex = textureFromImageSource(this.device, source, { label: "2d-image" });
+    this.imageTextures.set(source as object, tex);
+    return tex;
+  }
+
+  /** 让图像源的缓存纹理失效（源内容变了要重新上传时调用） */
+  invalidateImage(source: CanvasImageSourceLike): void {
+    const tex = this.imageTextures.get(source as object);
+    if (!tex) return;
+    tex.destroy();
+    this.imageTextures.delete(source as object);
+  }
+
+  /**
+   * 绘制图像（三种重载与原生一致）：
+   * `(img, dx, dy)` / `(img, dx, dy, dw, dh)` / `(img, sx, sy, sw, sh, dx, dy, dw, dh)`
+   */
+  drawImage(source: CanvasImageSourceLike, ...args: number[]): this {
+    const size = sourceSize(source);
+    let sx = 0;
+    let sy = 0;
+    let sw = size.width;
+    let sh = size.height;
+    let dx = 0;
+    let dy = 0;
+    let dw = 0;
+    let dh = 0;
+    if (args.length >= 8) {
+      [sx, sy, sw, sh, dx, dy, dw, dh] = args as [number, number, number, number, number, number, number, number];
+    } else if (args.length >= 4) {
+      [dx, dy, dw, dh] = args as [number, number, number, number];
+    } else if (args.length >= 2) {
+      [dx, dy] = args as [number, number];
+      dw = sw;
+      dh = sh;
+    } else {
+      throw new Error("[unidraw] drawImage 参数数量不足");
+    }
+    if (!(dw > 0) || !(dh > 0) || !(sw > 0) || !(sh > 0)) return this;
+    const tex = this.textureFor(source);
+    const a = this.state.globalAlpha;
+    const u0 = sx / size.width;
+    const v0 = sy / size.height;
+    const u1 = (sx + sw) / size.width;
+    const v1 = (sy + sh) / size.height;
+    const iStart = this.textI.length;
+    const push = (x: number, y: number, u: number, v: number): number => {
+      const p = this.devPt(x, y);
+      const id = this.textV.length / 8;
+      this.textV.push(p.x, p.y, u, v, 1, 1, 1, a);
+      return id;
+    };
+    const v00 = push(dx, dy, u0, v0);
+    const v10 = push(dx + dw, dy, u1, v0);
+    const v11 = push(dx + dw, dy + dh, u1, v1);
+    const v01 = push(dx, dy + dh, u0, v1);
+    this.pushTri("text", v00, v10, v11);
+    this.pushTri("text", v00, v11, v01);
+    if (this.textI.length > iStart) {
+      this.ops.push({
+        kind: "text",
+        clip: this.state.clip ? { ...this.state.clip } : null,
+        texture: tex,
+        iStart,
+        iEnd: this.textI.length,
+        comp: this.state.globalCompositeOperation,
+      });
+    }
     return this;
   }
 
