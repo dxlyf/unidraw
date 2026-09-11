@@ -6,6 +6,12 @@ export type LineCap = "butt" | "round" | "square";
 
 export type LineJoin = "miter" | "round" | "bevel";
 
+/** 与原生一致的水平对齐 */
+export type TextAlign = "left" | "right" | "center" | "start" | "end";
+
+/** 与原生一致的基线（`hanging` / `ideographic` 用 em 盒近似） */
+export type TextBaseline = "alphabetic" | "top" | "middle" | "bottom" | "hanging" | "ideographic";
+
 export interface Canvas2DOptions {
   vertexCapacity?: number;
 }
@@ -38,6 +44,11 @@ export interface SavedState {
   lineJoin: LineJoin;
   miterLimit: number;
   font: string;
+  textAlign: TextAlign;
+  textBaseline: TextBaseline;
+  /** 虚线样式（空数组 = 实线） */
+  lineDash: number[];
+  lineDashOffset: number;
   clip: DeviceRect | null;
 }
 

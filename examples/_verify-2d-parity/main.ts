@@ -50,7 +50,13 @@ interface SceneCtx {
   fill(rule?: string): void;
   stroke(): void;
   fillRect(x: number, y: number, w: number, h: number): void;
-  fillText(text: string, x: number, y: number): void;
+  fillText(text: string, x: number, y: number, maxWidth?: number): void;
+  strokeText(text: string, x: number, y: number, maxWidth?: number): void;
+  measureText(text: string): { width: number };
+  setLineDash?(segments: number[]): void;
+  lineDashOffset: number;
+  textAlign: string;
+  textBaseline: string;
   save(): void;
   restore(): void;
   translate(x: number, y: number): void;
@@ -161,6 +167,105 @@ function drawFillRules(c: SceneCtx): void {
   c.lineTo(444, 260);
   c.closePath();
   c.fill();
+}
+
+/** 虚线 + 文字 API（textAlign / textBaseline / strokeText / measureText）场景 */
+const EXTRAS_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "虚线", x: 12, y: 14, w: 456, h: 58 },
+  { name: "textAlign", x: 12, y: 78, w: 456, h: 52 },
+  { name: "textBaseline", x: 12, y: 136, w: 456, h: 56 },
+  { name: "strokeText", x: 12, y: 198, w: 456, h: 60 },
+];
+
+function drawTextDash(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  // 1) 虚线：不同 pattern / 不同 lineDashOffset / 圆头
+  c.strokeStyle = "#7aa2ff";
+  c.lineWidth = 3;
+  c.lineCap = "butt";
+  c.setLineDash?.([16, 10]);
+  c.lineDashOffset = 0;
+  c.beginPath();
+  c.moveTo(20, 28);
+  c.lineTo(460, 28);
+  c.stroke();
+
+  c.strokeStyle = "#3dd68c";
+  c.setLineDash?.([16, 10]);
+  c.lineDashOffset = 13;
+  c.beginPath();
+  c.moveTo(20, 44);
+  c.lineTo(460, 44);
+  c.stroke();
+
+  c.strokeStyle = "#ff9a3d";
+  c.lineCap = "round";
+  c.setLineDash?.([2, 12]);
+  c.lineDashOffset = 0;
+  c.beginPath();
+  c.moveTo(20, 62);
+  c.lineTo(460, 62);
+  c.stroke();
+  c.setLineDash?.([]);
+  c.lineCap = "butt";
+
+  // 2) textAlign：同一 x 上的 left / center / right
+  c.fillStyle = "#f2f5ff";
+  c.font = `600 20px ${FONT}`;
+  const ax = 240;
+  c.textAlign = "left";
+  c.fillText("left|", ax, 96);
+  c.textAlign = "center";
+  c.fillText("center", ax, 118);
+  c.textAlign = "right";
+  c.fillText("|right", ax, 118);
+  c.textAlign = "left";
+
+  // 3) textBaseline：同一 y 上的四种基线
+  c.font = `500 16px ${FONT}`;
+  const by = 172;
+  c.fillStyle = "#35d7ee";
+  c.textBaseline = "top";
+  c.fillText("top", 24, by);
+  c.fillStyle = "#f5d02e";
+  c.textBaseline = "middle";
+  c.fillText("middle", 92, by);
+  c.fillStyle = "#ff5c7a";
+  c.textBaseline = "bottom";
+  c.fillText("bottom", 178, by);
+  c.fillStyle = "#b07cff";
+  c.textBaseline = "alphabetic";
+  c.fillText("alphabetic", 268, by);
+  c.textBaseline = "alphabetic";
+
+  // 4) strokeText + fillText（先描边后填充，原生常见用法）
+  c.font = `700 30px ${FONT}`;
+  c.lineWidth = 4;
+  c.strokeStyle = "#5aa0ff";
+  c.fillStyle = "#101826";
+  c.strokeText("Stroke 描边", 24, 236);
+  c.fillText("Stroke 描边", 24, 236);
+
+  // 5) 虚线 + measureText 对齐右端
+  const label = "measureText";
+  const w = c.measureText(label).width;
+  c.font = `400 14px ${FONT}`;
+  const w2 = c.measureText(label).width;
+  c.fillStyle = "#9aa4bb";
+  c.textAlign = "right";
+  c.fillText(label, 456, 262);
+  c.textAlign = "left";
+  // 用测得的宽度画一条等长参考线（宽度不一致会立刻看出错位）
+  c.strokeStyle = "#9aa4bb";
+  c.lineWidth = 1;
+  c.setLineDash?.([]);
+  c.beginPath();
+  c.moveTo(456 - w2, 264);
+  c.lineTo(456, 264);
+  c.stroke();
+  void w;
 }
 
 function drawScene(c: SceneCtx, g: GradientFactory): void {
@@ -311,6 +416,7 @@ interface Region {
 const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFactory) => void; regions: typeof REGIONS }> = {
   parity: { label: "全能力", draw: drawScene, regions: REGIONS },
   fillrules: { label: "填充规则", draw: (c) => drawFillRules(c), regions: FILL_REGIONS },
+  extras: { label: "虚线/文字API", draw: (c) => drawTextDash(c), regions: EXTRAS_REGIONS },
 };
 const sceneId = params.get("scene") ?? "parity";
 const scene = SCENES[sceneId] ?? SCENES.parity!;

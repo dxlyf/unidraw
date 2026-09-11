@@ -14,11 +14,12 @@ import { LinearGradient } from "./LinearGradient.js";
 import { RadialGradient } from "./RadialGradient.js";
 import { Path2D } from "./path.js";
 import { fillTriangles, type FillRule } from "./fill.js";
+import type { Contour } from "./pathTypes.js";
 import type { Pt2 } from "./matrix.js";
 import { identityAffine, copyAffine, multiplyAffine, transformPoint } from "./matrix.js";
 import { FLAT_FS_GLSL, FLAT_VS_GLSL, FLAT_WGSL, TEX_FS_GLSL, TEX_VS_GLSL, TEX_WGSL } from "./shaders.js";
-import { TextRenderer } from "./text.js";
-import type { Canvas2DOptions, DeviceRect, LineCap, LineJoin, Op, SavedState } from "./types.js";
+import { TextRenderer, type TextMetricsLike } from "./text.js";
+import type { Canvas2DOptions, DeviceRect, LineCap, LineJoin, Op, SavedState, TextAlign, TextBaseline } from "./types.js";
 import { DEFAULT_FONT } from "./types.js";
 import { detectRectContour, intersectRects, lineIntersect, normalOffset, sameClip, unitDir } from "./geometry2d.js";
 
@@ -101,6 +102,10 @@ export class Canvas2D {
     lineJoin: "miter",
     miterLimit: 10,
     font: DEFAULT_FONT,
+    textAlign: "left",
+    textBaseline: "alphabetic",
+    lineDash: [],
+    lineDashOffset: 0,
     clip: null,
   };
 
@@ -344,6 +349,41 @@ export class Canvas2D {
   set font(v: string) {
     this.state.font = v;
   }
+  get textAlign(): TextAlign {
+    return this.state.textAlign;
+  }
+  set textAlign(v: TextAlign) {
+    this.state.textAlign = v === "center" || v === "right" || v === "end" ? v : "left";
+  }
+  get textBaseline(): TextBaseline {
+    return this.state.textBaseline;
+  }
+  set textBaseline(v: TextBaseline) {
+    this.state.textBaseline =
+      v === "top" || v === "middle" || v === "bottom" || v === "hanging" || v === "ideographic" ? v : "alphabetic";
+  }
+  /** 虚线样式：空数组 = 实线（与原生 `setLineDash` 语义一致） */
+  setLineDash(segments: readonly number[]): void {
+    const clean: number[] = [];
+    for (const s of segments) {
+      if (Number.isFinite(s) && s >= 0) clean.push(s);
+    }
+    if (clean.length === 0 || clean.every((v) => v === 0)) {
+      this.state.lineDash = [];
+      return;
+    }
+    // 奇数个元素要复制一遍（原生规则：`[5]` 等价于 `[5,5]`）
+    this.state.lineDash = clean.length % 2 === 1 ? [...clean, ...clean] : clean;
+  }
+  getLineDash(): number[] {
+    return [...this.state.lineDash];
+  }
+  get lineDashOffset(): number {
+    return this.state.lineDashOffset;
+  }
+  set lineDashOffset(v: number) {
+    this.state.lineDashOffset = Number.isFinite(v) ? v : 0;
+  }
 
   save(): void {
     this.stack.push({
@@ -356,6 +396,10 @@ export class Canvas2D {
       lineJoin: this.state.lineJoin,
       miterLimit: this.state.miterLimit,
       font: this.state.font,
+      textAlign: this.state.textAlign,
+      textBaseline: this.state.textBaseline,
+      lineDash: [...this.state.lineDash],
+      lineDashOffset: this.state.lineDashOffset,
       clip: this.state.clip ? { ...this.state.clip } : null,
     });
   }
@@ -581,6 +625,76 @@ export class Canvas2D {
     return transformPoint(this.state.ctm, x, y, { x: 0, y: 0 });
   }
 
+  // ======================================================================
+  // 虚线
+  // ======================================================================
+
+  /**
+   * 按 `lineDash` / `lineDashOffset` 把轮廓切成实线段。
+   *
+   * 与原生一致：按**弧长**在压平后的折线上推进，奇数长度的模式复制一遍
+   * （`[5]` ≡ `[5,5]`），`lineDashOffset` 表示从模式内的哪个距离开始；
+   * 闭合轮廓会跨越起点继续（首段与末段共用同一个相位）。
+   */
+  private applyLineDash(contours: Contour[]): Contour[] {
+    const dash = this.state.lineDash;
+    if (dash.length === 0) return contours;
+    const period = dash.reduce((a, b) => a + b, 0);
+    if (!(period > 1e-9)) return contours;
+
+    // 起始相位
+    let phase = ((this.state.lineDashOffset % period) + period) % period;
+    let index = 0;
+    while (phase >= dash[index]! - 1e-9 && dash[index]! > 0) {
+      phase -= dash[index]!;
+      index = (index + 1) % dash.length;
+    }
+
+    const out: Contour[] = [];
+    for (const contour of contours) {
+      const pts = contour.points;
+      if (pts.length < 2) continue;
+      let idx = index;
+      let remaining = dash[idx]! - phase;
+      let on = idx % 2 === 0;
+      let cur: Pt2[] | null = null;
+      const flush = (): void => {
+        if (cur && cur.length >= 2) out.push({ points: cur, closed: false });
+        cur = null;
+      };
+      const segCount = contour.closed ? pts.length : pts.length - 1;
+      for (let s = 0; s < segCount; s++) {
+        const a = pts[s]!;
+        const b = pts[(s + 1) % pts.length]!;
+        const segLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (segLen < 1e-9) continue;
+        let consumed = 0;
+        while (segLen - consumed > 1e-9) {
+          const step = Math.min(remaining, segLen - consumed);
+          const t0 = consumed / segLen;
+          const t1 = (consumed + step) / segLen;
+          const p0: Pt2 = [a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0];
+          const p1: Pt2 = [a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1];
+          if (on) {
+            if (!cur) cur = [p0];
+            cur.push(p1);
+          } else {
+            flush();
+          }
+          consumed += step;
+          remaining -= step;
+          if (remaining <= 1e-9) {
+            idx = (idx + 1) % dash.length;
+            remaining = dash[idx]!;
+            on = !on;
+          }
+        }
+      }
+      flush();
+    }
+    return out;
+  }
+
   /**
    * 发射一个「平铺」顶点（纯色或渐变，stride 64，见 shaders.ts）。
    *
@@ -686,7 +800,7 @@ export class Canvas2D {
   // ======================================================================
 
   stroke(): void {
-    const contours = this.path.flatten(0.2);
+    const contours = this.applyLineDash(this.path.flatten(0.2));
     if (contours.length === 0) return;
     this.paint = this.resolvePaint(this.state.strokeStyle);
     const hw = this.state.lineWidth / 2;
@@ -872,16 +986,49 @@ export class Canvas2D {
   // 文本
   // ======================================================================
 
-  fillText(text: string, x: number, y: number): this {
+  fillText(text: string, x: number, y: number, maxWidth?: number): this {
+    return this.drawText(text, x, y, maxWidth, 0);
+  }
+
+  /** 描边文字：字形由浏览器 `strokeText` 栅格化（轮廓质量与原生一致） */
+  strokeText(text: string, x: number, y: number, maxWidth?: number): this {
+    return this.drawText(text, x, y, maxWidth, this.state.lineWidth);
+  }
+
+  /** 文字度量（`width` 为前进宽度；字段名与原生 `TextMetrics` 对齐） */
+  measureText(text: string): TextMetricsLike {
+    return this.textRenderer.measure(text, this.state.font);
+  }
+
+  private drawText(text: string, x: number, y: number, maxWidth: number | undefined, strokeWidth: number): this {
     if (!text) return this;
-    const glyph = this.textRenderer.getGlyph(text, this.state.font);
-    const style = this.state.fillStyle;
+    const glyph = this.textRenderer.getGlyph(text, this.state.font, strokeWidth);
+    const m = this.textRenderer.measure(text, this.state.font);
+    const style = strokeWidth > 0 ? this.state.strokeStyle : this.state.fillStyle;
+
+    // textAlign / textBaseline：把「对齐点 + 基线」换算成图集左上角
+    const align = this.state.textAlign;
+    const alignOffsetX = align === "center" ? m.width / 2 : align === "right" || align === "end" ? m.width : 0;
+    const baseline = this.state.textBaseline;
+    const baselineOffset =
+      baseline === "top" || baseline === "hanging"
+        ? m.fontBoundingBoxAscent
+        : baseline === "middle"
+          ? (m.fontBoundingBoxAscent - m.fontBoundingBoxDescent) / 2
+          : baseline === "bottom" || baseline === "ideographic"
+            ? -m.fontBoundingBoxDescent
+            : 0;
+
+    const left = x - alignOffsetX + glyph.offsetX;
+    const top = y + baselineOffset + glyph.offsetY;
+    // maxWidth：原生会横向压缩，这里按比例缩放四边形（视觉等价）
+    const squeeze = maxWidth !== undefined && m.width > maxWidth && m.width > 0 ? maxWidth / m.width : 1;
+    const w = glyph.width * squeeze;
+
     const iStart = this.textI.length;
-    const left = x + glyph.offsetX;
-    const top = y + glyph.offsetY;
     const v0 = this.pushTextV(left, top, 0, 0, style);
-    const v1 = this.pushTextV(left + glyph.width, top, 1, 0, style);
-    const v2 = this.pushTextV(left + glyph.width, top + glyph.height, 1, 1, style);
+    const v1 = this.pushTextV(left + w, top, 1, 0, style);
+    const v2 = this.pushTextV(left + w, top + glyph.height, 1, 1, style);
     const v3 = this.pushTextV(left, top + glyph.height, 0, 1, style);
     this.pushTri("text", v0, v1, v2);
     this.pushTri("text", v0, v2, v3);

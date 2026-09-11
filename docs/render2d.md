@@ -85,14 +85,27 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 - 说明：任意路径裁剪需要 stencil 支持，暂未开放。
 
 ### 文本
-- `fillText(text, x, y)`（以基线 y 对齐；默认左对齐）
+- `fillText(text, x, y, maxWidth?)` / `strokeText(text, x, y, maxWidth?)`；
+- `measureText(text)` 返回 `{ width, actualBoundingBox*, fontBoundingBox* }`（字段名与原生
+  `TextMetrics` 对齐，`width` 是前进宽度）；
+- `textAlign`（left/right/center/start/end）与 `textBaseline`
+  （alphabetic/top/middle/bottom/hanging/ideographic），随 `save/restore` 压栈；
+  - 水平对齐用**前进宽度**计算（`center` → 偏移 `width/2`），与原生一致；
+  - `top/middle/bottom` 用 `fontBoundingBoxAscent/Descent`（em 盒）计算，
+    `hanging/ideographic` 分别按 em 盒上/下沿近似 —— 与原生有**亚像素级**差异
+    （对照页 textBaseline 分区平均差 ≈ 1.9/255）；
 - `font` 设为 CSS font 简写；字形通过隐藏 2D canvas 栅格化为纹理并缓存
-  （LRU，最多 96 个）；仅浏览器可用（`text.ts` 会给出明确错误）
+  （LRU，最多 96 个）；仅浏览器可用（`text.ts` 会给出明确错误）；
+- `strokeText` 直接让浏览器 `strokeText` 栅格化**轮廓**，因此描边文字的
+  圆角接头/尖角质量与原生一致（不是「把填充加粗」的近似）；
 - 落点与原生一致：`actualBoundingBoxLeft/Ascent` 用来定位**图集左上角相对
   对齐点/基线**的偏移（`offsetX/offsetY`），不是直接当坐标用；
-- 文本颜色跟随 `fillStyle`（纯色/渐变都会采样到四边形顶点）；
-- 文字的抗锯齿来自「在分数像素位置绘制图集纹理 + 线性采样」，与原生
-  Canvas2D 的次像素定位观感一致。
+- `maxWidth` 通过横向压缩四边形实现（视觉等价于原生压缩字距）。
+
+### 虚线
+- `setLineDash(segments)` / `getLineDash()` / `lineDashOffset`，随 `save/restore` 压栈；
+- 按**弧长**在压平后的折线上推进，奇数长度的模式复制一遍（`[5]` ≡ `[5,5]`），
+  闭合轮廓跨越起点继续；每段实线各自成段，因此 `lineCap` 对每段都生效。
 
 ### 抗锯齿
 - 曲线/斜边/细描边的锯齿由 **MSAA** 解决，默认跟随 `Renderer` 的 `msaa`（默认 4）；
@@ -111,7 +124,7 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
   半透明粗描边在接头处会比原生略深；
 - 圆角 join 用扇形逼近；
 - 字形纹理在 DPR>1 时以设备像素栅格化（缩小绘制可能略糊，可后续按 DPR 缓存）；
-- 尚未支持：`lineDash`、`shadowBlur`、`drawImage`/`createPattern`、
+- 尚未支持：`shadowBlur`、`drawImage`/`createPattern`、
   `globalCompositeOperation`（这些在框架层可以直接用渲染目标/混合模式自己搭）。
 
 ## 与原生的差距（量化）
@@ -132,7 +145,10 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 | 1.2px 细线 | 1.31 | 亚像素栅格化差异，两端都会略有不同 |
 
 另有 `?scene=fillrules` 场景专门验证多子路径填充规则（重叠并集 / evenodd 挖洞 /
-nonzero 反向挖洞 / 自相交五角星），整幅平均差 ≈ 0.10，各分区 ≤ 0.32。
+nonzero 反向挖洞 / 自相交五角星），整幅平均差 ≈ 0.10，各分区 ≤ 0.32；
+`?scene=extras` 验证虚线（不同 pattern/offset/线头）与文字 API
+（textAlign / textBaseline / strokeText / measureText），整幅 ≈ 0.63，
+其中虚线 0.18、textAlign 0.60、strokeText 0.49、textBaseline 1.91。
 
 继续排查时应先看这张表：哪个区域掉下去，就说明对应图元的求值/栅格化方式跑偏了。
 

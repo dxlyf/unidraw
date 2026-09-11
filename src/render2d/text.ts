@@ -24,6 +24,19 @@ export interface GlyphInfo {
   offsetY: number;
 }
 
+/** `measureText` 返回的度量（字段名与原生 `TextMetrics` 对齐） */
+export interface TextMetricsLike {
+  /** 前进宽度（原生排版用的宽度，也是 textAlign 对齐的依据） */
+  width: number;
+  actualBoundingBoxLeft: number;
+  actualBoundingBoxRight: number;
+  actualBoundingBoxAscent: number;
+  actualBoundingBoxDescent: number;
+  /** em 盒（字体）上下沿，`textBaseline` 的 top/middle/bottom 用它 */
+  fontBoundingBoxAscent: number;
+  fontBoundingBoxDescent: number;
+}
+
 const MAX_GLYPHS = 96;
 /** 图集四周留白（纹素），避免线性采样时采到相邻内容/边界 */
 const PAD = 2;
@@ -35,6 +48,8 @@ function hasDocument(): boolean {
 export class TextRenderer {
   private readonly device: Device;
   private cache = new Map<string, GlyphInfo>();
+  private metricsCache = new Map<string, TextMetricsLike>();
+  private measureCtx: CanvasRenderingContext2D | null = null;
 
   constructor(device: Device) {
     this.device = device;
@@ -48,11 +63,50 @@ export class TextRenderer {
       if (g) g.texture.destroy();
       this.cache.delete(first);
     }
+    while (this.metricsCache.size > MAX_GLYPHS * 2) {
+      const first = this.metricsCache.keys().next().value as string | undefined;
+      if (first === undefined) break;
+      this.metricsCache.delete(first);
+    }
   }
 
-  /** 取字形（命中缓存直接返回，否则栅格化） */
-  getGlyph(text: string, font: string): GlyphInfo {
+  private ctxForMeasure(): CanvasRenderingContext2D {
+    if (this.measureCtx) return this.measureCtx;
+    if (!hasDocument()) throw new Error("[unidraw] measureText 需要浏览器环境");
+    const cv = document.createElement("canvas");
+    const ctx = cv.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("[unidraw] 无法创建 2d 画布");
+    this.measureCtx = ctx;
+    return ctx;
+  }
+
+  /** 文字度量（带缓存） */
+  measure(text: string, font: string): TextMetricsLike {
     const key = `${font}\u0000${text}`;
+    const hit = this.metricsCache.get(key);
+    if (hit) return hit;
+    const ctx = this.ctxForMeasure();
+    ctx.font = font;
+    const m = ctx.measureText(text);
+    const ascent = m.actualBoundingBoxAscent;
+    const descent = m.actualBoundingBoxDescent;
+    const metrics: TextMetricsLike = {
+      width: m.width,
+      actualBoundingBoxLeft: typeof m.actualBoundingBoxLeft === "number" ? m.actualBoundingBoxLeft : 0,
+      actualBoundingBoxRight: typeof m.actualBoundingBoxRight === "number" ? m.actualBoundingBoxRight : m.width,
+      actualBoundingBoxAscent: typeof ascent === "number" ? ascent : 0,
+      actualBoundingBoxDescent: typeof descent === "number" ? descent : 0,
+      fontBoundingBoxAscent: typeof m.fontBoundingBoxAscent === "number" ? m.fontBoundingBoxAscent : Number.parseFloat(font) * 0.8 || 20,
+      fontBoundingBoxDescent: typeof m.fontBoundingBoxDescent === "number" ? m.fontBoundingBoxDescent : Number.parseFloat(font) * 0.2 || 5,
+    };
+    this.metricsCache.set(key, metrics);
+    this.evictIfNeeded();
+    return metrics;
+  }
+
+  /** 取字形（命中缓存直接返回，否则栅格化）；`strokeWidth > 0` 时栅格化描边字形 */
+  getGlyph(text: string, font: string, strokeWidth = 0): GlyphInfo {
+    const key = `${font}\u0000${strokeWidth.toFixed(3)}\u0000${text}`;
     const hit = this.cache.get(key);
     if (hit) {
       // LRU：重新插入到尾部
@@ -60,7 +114,7 @@ export class TextRenderer {
       this.cache.set(key, hit);
       return hit;
     }
-    const glyph = this.rasterize(text, font);
+    const glyph = this.rasterize(text, font, strokeWidth);
     this.evictIfNeeded();
     this.cache.set(key, glyph);
     return glyph;
@@ -76,28 +130,22 @@ export class TextRenderer {
    * - 绘制时四边形左上角 = `(x + offsetX, y + offsetY)`，其中
    *   `offsetX = inkLeft - PAD`、`offsetY = inkTop - PAD`。
    */
-  private rasterize(text: string, font: string): GlyphInfo {
+  private rasterize(text: string, font: string, strokeWidth: number): GlyphInfo {
     if (!hasDocument()) {
       throw new Error("[unidraw] fillText 需要浏览器环境（依赖 DOM canvas 栅格化字形）");
     }
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) throw new Error("[unidraw] 无法创建 2d 画布");
-    ctx.font = font;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    const m = ctx.measureText(text);
-    const hasActual = typeof m.actualBoundingBoxLeft === "number";
-    // 墨迹包围盒（相对对齐点/基线）
-    const bboxLeft = hasActual ? m.actualBoundingBoxLeft : 0;
-    const bboxRight = hasActual ? m.actualBoundingBoxRight : m.width;
-    const ascent = hasActual ? Math.max(1, m.actualBoundingBoxAscent) : Math.ceil(parseFloat(font) * 0.8 || 20);
-    const descent = hasActual ? Math.max(1, m.actualBoundingBoxDescent) : Math.ceil(parseFloat(font) * 0.2 || 5);
-    // 墨迹边界相对对齐点：inkLeft 向右为正（= −bboxLeft），inkTop 向上为负（= −ascent）
+    const m = this.measure(text, font);
+    // 描边会向外扩 lineWidth/2，图集留白与包围盒都要跟着放大（miter 尖角再多留一点）
+    const grow = strokeWidth > 0 ? strokeWidth / 2 + 1 : 0;
+    const bboxLeft = m.actualBoundingBoxLeft - grow;
+    const bboxRight = m.actualBoundingBoxRight + grow;
+    const ascent = Math.max(1, m.actualBoundingBoxAscent) + grow;
+    const descent = Math.max(1, m.actualBoundingBoxDescent) + grow;
     const inkLeft = -bboxLeft;
     const inkTop = -ascent;
     const w = Math.max(1, Math.ceil(bboxRight + inkLeft) + PAD * 2);
     const h = Math.max(1, Math.ceil(ascent + descent) + PAD * 2);
+    const canvas = document.createElement("canvas");
     canvas.width = w;
     canvas.height = h;
     const g = canvas.getContext("2d", { willReadFrequently: true });
@@ -106,8 +154,17 @@ export class TextRenderer {
     g.textAlign = "left";
     g.textBaseline = "alphabetic";
     g.clearRect(0, 0, w, h);
-    g.fillStyle = "#ffffff";
-    g.fillText(text, PAD - inkLeft, PAD - inkTop);
+    if (strokeWidth > 0) {
+      // 让浏览器自己描边：字形轮廓的描边质量与原生完全一致
+      g.strokeStyle = "#ffffff";
+      g.lineWidth = strokeWidth;
+      g.lineJoin = "round";
+      g.lineCap = "round";
+      g.strokeText(text, PAD - inkLeft, PAD - inkTop);
+    } else {
+      g.fillStyle = "#ffffff";
+      g.fillText(text, PAD - inkLeft, PAD - inkTop);
+    }
 
     const image = g.getImageData(0, 0, w, h);
     const texture = this.device.createTexture({
