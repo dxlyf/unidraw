@@ -385,8 +385,11 @@ CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种�
   rgba32float/depth24plus/depth32float`；无压缩纹理；
 - 回读仅支持 8bit 颜色纹理（`rgba8unorm/bgra8unorm` 系列）；
 - 阴影只覆盖方向光/聚光（点光 cube map 未实现）；无计算管线、无 storage buffer、无 indirect draw；
+- **着色器要成对写**：GLSL ES 3.00 与 WGSL 各一份（框架不做转译）—— 自定义材质 / 后处理 /
+  全屏效果的日常成本就在这里；
 - WebGL2 侧 `maxAnisotropy` 与 WebGPU 侧 `generateMipmaps()` 尚未接到底层 API；
-- WGSL/GLSL 需成对写作（参考着色器指南），未来可引入自动转译。
+- 2D 侧：`Canvas2D` 的图层模式（以目标为纹理的混合模式）成本与画布面积成正比，
+  尚未按 op 包围盒裁剪（见 [render2d.md](render2d.md) 已知边界）；
 
 ## 13. 未来优化方向
 
