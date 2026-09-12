@@ -280,6 +280,8 @@ const STROKE_REGIONS: { name: string; x: number; y: number; w: number; h: number
   { name: "整圆arc", x: 368, y: 8, w: 106, h: 116 },
   { name: "闭合贝塞尔心形", x: 8, y: 132, w: 226, h: 128 },
   { name: "五角星miter", x: 244, y: 132, w: 230, h: 128 },
+  { name: "round左上(收尾)", x: 24, y: 24, w: 32, h: 32 },
+  { name: "round右上", x: 76, y: 24, w: 32, h: 32 },
 
 ];
 
@@ -341,6 +343,18 @@ function drawStrokes(c: SceneCtx): void {
   c.bezierCurveTo(hx - sc * 0.9, hy - sc * 0.5, hx - sc * 0.5, hy - sc * 1.05, hx, hy - sc * 0.42);
   c.bezierCurveTo(hx + sc * 0.5, hy - sc * 1.05, hx + sc * 0.9, hy - sc * 0.5, hx, hy + sc * 0.2);
   c.closePath();
+  c.stroke();
+
+  // 7) 用户报的那一档：rect + round join；一粗一细对照
+  c.strokeStyle = "#f2f5ff";
+  c.lineJoin = "round";
+  c.lineWidth = 12;
+  c.beginPath();
+  c.rect(40, 40, 52, 52);
+  c.stroke();
+  c.lineWidth = 1.6;
+  c.beginPath();
+  c.rect(160, 40, 52, 52);
   c.stroke();
 
   // 6) 五角星 miter（尖角 + 首尾闭合）

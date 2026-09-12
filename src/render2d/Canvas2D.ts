@@ -1067,12 +1067,20 @@ export class Canvas2D {
     if (this.state.lineJoin === "round") {
       const a0 = Math.atan2(ay - p1[1], ax - p1[0]);
       const a1 = Math.atan2(by - p1[1], bx - p1[0]);
+      // 圆弧必须经过**外角平分线**：直接取 a1−a0 时，atan2 在 ±π 处的分支会让某些角
+      // 变成 1.5π（270°）→ 扇形走内侧长弧、外角那 90° 完全没被覆盖，留下 hw×hw 缺口。
+      // 表现就是「同一个矩形的四个圆角，只有首尾那个（或某些角）缺一块」。
+      const bisector = Math.atan2(o1.y + o2.y, o1.x + o2.x);
+      let sweep = a1 - a0;
+      if (Math.cos(a0 + sweep * 0.5 - bisector) < 0) {
+        sweep = sweep > 0 ? sweep - Math.PI * 2 : sweep + Math.PI * 2;
+      }
       const fan = (cxa: number, cya: number) => {
-        const n = Math.max(2, Math.ceil((Math.abs(a1 - a0) / (Math.PI * 2)) * 64));
+        const n = Math.max(2, Math.ceil((Math.abs(sweep) / (Math.PI * 2)) * 64));
         const vc = this.pushFlat(cxa, cya);
         let prev = -1;
         for (let i = 0; i <= n; i++) {
-          const t = a0 + ((a1 - a0) * i) / n;
+          const t = a0 + (sweep * i) / n;
           const v = this.pushFlat(p1[0] + Math.cos(t) * hw, p1[1] + Math.sin(t) * hw);
           if (prev >= 0) this.pushTri("flat", vc, prev, v);
           prev = v;
