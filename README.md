@@ -21,6 +21,7 @@
 | 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 稳定化） / 聚光（透视）各一张深度贴图，PCF 软阴影（`filter` hard / 3×3 / 5×5）；`mapSize`/`bias`(世界单位)/`normalBias`(自动)/`radius`/`filter`/`intensity`/`side`/`stabilize` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
 | 实例化 | `InstancedMesh`：同一几何体 + 材质一次 draw 画 N 个实例（实例矩阵走 `stepMode: "instance"` 顶点流），自带脏区间上传、联合包围球剔除、阴影/拾取支持；与「N 个独立 Mesh」逐像素一致（示例自检 meanDiff = 0） |
 | 内置几何 | box / plane / sphere / triangle / fullscreenTriangle + **cylinder(圆台/封口)/ cone / torus / capsule**；闭合几何保证**无边界边（没有洞）/无零面积三角形/无非流形边**，体积与解析值一致（单测守护） |
+| 纹理 | 2D / **3D** / **2D 数组** / **cube**（`TextureDescriptor.dimension` + `depthOrArrayLayers`），逐层或整卷上传；两个后端都支持并有无头验证页 `examples/_verify-texture-dims` |
 | 场景图与渲染器 | `Node3D`（层级/世界矩阵/脏标记）、`Scene`、`Mesh`（几何+材质+renderOrder+frustumCulled）、`SceneRenderer`（视锥剔除 + 不透明/半透明排序 + 渲染统计） |
 | 交互 | `InputManager`（指针/滚轮/键盘 → NDC，click/dblclick 合成，多指，dispose） |
 | 图形拾取 | `Raycaster`（CPU 包围球→三角形精确命中，按距离排序）+ `ColorPicker`（GPU 离屏 ID pass + 像素回读，逐像素精确） |
@@ -30,7 +31,7 @@
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
 | 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / 实例化 / 资源缓存 / App·插件（`node --test`，160 个用例） |
-| 示例 | 19 个可运行示例（同一源码切 WebGL2 / WebGPU），全部带 **lil-gui 参数面板**：**示例游戏《坦克世界》**、**2D 绘制**、**3D 材质与几何画廊**、**PBR 材质（StandardMaterial 矩阵）**、**混合模式**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
+| 示例 | 20 个可运行示例（同一源码切 WebGL2 / WebGPU），全部带 **lil-gui 参数面板**：**示例游戏《坦克世界》**、**2D 绘制**、**3D 材质与几何画廊**、**PBR 材质（StandardMaterial 矩阵）**、**混合模式**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）、`lil-gui`（示例的参数面板）。
 
@@ -528,13 +529,26 @@ docs/          中文文档（见下）
 
 ## 路线图（可能的后续）
 
-- 点光阴影（cube map；WebGL2 需要每面各跑一趟）
-- 计算管线 / 存储缓冲 / indirect draw
-- 命令编码去 GC（当前已内联动态偏移、去掉逐 draw 数组分配）
-- 更激进的实例化（实例动画放进 vertex/compute）
-- 纹理压缩格式、mipmap 自动生成（WebGL2 `generateMipmaps`、`maxAnisotropy`）
-- 更完整的数学（四元数、AABB、射线）
-- WebGPU 原生 GPU 队列级编码（当前在 submit 时翻译统一命令，换取三后端一致性）
+已完成（本轮）：数学补全（Euler/Quaternion/Plane/Box2/Box3/Sphere/Frustum/Ray/Raycaster 等，
+Ray/Raycaster 已迁入 `src/math`）、**3D / 2D 数组 / cube 纹理**（创建 + 逐层/整卷上传，
+两个后端验证通过）、2D 的 `clearRect` / 网页坐标系 / pixelRatio / 阴影（真高斯 + spread）/
+25 种合成模式。
+
+接下来（按价值排序，改法见 [docs/extension.md §7](docs/extension.md)）：
+
+1. **分层渲染附件**：`RenderTarget` 加 `layer`/`face`（附件 view 的 `baseArrayLayer`）——
+   做完点光 **cube map 阴影** 就只差每面跑一趟深度 pass（WebGL2 注意：分层附件只能 1x 采样，
+   MSAA renderbuffer 挂不到 cube 的某一面）；
+2. **回读扩展**：`ReadPixelsOptions` 加 `type`（float32/深度）。两条原生路径已在
+   `examples/_verify-texture-dims` 里跑通（WebGL2 `framebufferTextureLayer`/面目标 + `readPixels`，
+   WebGPU `copyTextureToBuffer` + `mapAsync` + 256 行对齐），搬进 `device/readback.ts` 即可；
+3. 计算管线 / 存储缓冲 / indirect draw（**WebGL2 无对应 API，只能 WebGPU-only + 降级**）；
+4. 纹理压缩格式（BC/ETC2/ASTC）、WebGL2 `maxAnisotropy`、WebGPU `generateMipmaps`；
+5. 2D 图层模式按 op 包围盒裁剪（当前成本与画布面积成正比）；
+6. 命令编码去 GC、更激进的实例化（实例动画放进 vertex/compute）、WebGPU 原生队列级编码
+   （当前在 submit 时翻译统一命令，换取三后端一致性）。
+
+已知边界汇总见 [docs/architecture.md §12](docs/architecture.md)。
 
 ## License
 
