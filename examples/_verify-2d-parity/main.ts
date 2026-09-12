@@ -278,8 +278,9 @@ const STROKE_REGIONS: { name: string; x: number; y: number; w: number; h: number
   { name: "closePath三角", x: 128, y: 8, w: 116, h: 116 },
   { name: "首尾重合点", x: 248, y: 8, w: 116, h: 116 },
   { name: "整圆arc", x: 368, y: 8, w: 106, h: 116 },
-  { name: "closePath圆角", x: 8, y: 132, w: 226, h: 128 },
+  { name: "闭合贝塞尔心形", x: 8, y: 132, w: 226, h: 128 },
   { name: "五角星miter", x: 244, y: 132, w: 230, h: 128 },
+
 ];
 
 function drawStrokes(c: SceneCtx): void {
@@ -320,11 +321,25 @@ function drawStrokes(c: SceneCtx): void {
   // 5) closePath + round join
   c.strokeStyle = "#ff9a3d";
   c.lineJoin = "round";
+  c.lineWidth = 12;
   c.beginPath();
-  c.moveTo(40, 160);
-  c.lineTo(120, 148);
-  c.lineTo(200, 190);
-  c.lineTo(120, 240);
+  c.moveTo(128, 206);
+  c.bezierCurveTo(128 - 52, 206 - 34, 128 - 29, 206 - 72, 128, 206 - 29);
+  c.bezierCurveTo(128 + 29, 206 - 72, 128 + 52, 206 - 34, 128, 206);
+  c.closePath();
+  c.stroke();
+
+  // 6b) 心形写法：贝塞尔回到起点 + closePath（收尾点与起点重合）
+  c.strokeStyle = "#ff5c7a";
+  c.lineJoin = "round";
+  c.lineWidth = 9;
+  c.beginPath();
+  const hx = 110;
+  const hy = 200;
+  const sc = 42;
+  c.moveTo(hx, hy + sc * 0.2);
+  c.bezierCurveTo(hx - sc * 0.9, hy - sc * 0.5, hx - sc * 0.5, hy - sc * 1.05, hx, hy - sc * 0.42);
+  c.bezierCurveTo(hx + sc * 0.5, hy - sc * 1.05, hx + sc * 0.9, hy - sc * 0.5, hx, hy + sc * 0.2);
   c.closePath();
   c.stroke();
 

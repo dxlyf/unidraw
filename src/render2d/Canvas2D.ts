@@ -937,7 +937,29 @@ export class Canvas2D {
   // ======================================================================
 
   stroke(): void {
-    const contours = this.applyLineDash(this.path.flatten(0.2));
+    // 描边前先把**相邻重合点**去掉；闭合轮廓若末点等于首点也丢掉末点。
+    //
+    // 为什么必须做：`closePath()` 之前若最后一段正好回到起点（心形那种
+    // 「moveTo(起) → 贝塞尔 → 回到起 → closePath()」的写法），闭合轮廓里就多出
+    // 一条**零长收尾段**；`joinCorner` 里 e1 = p1 - p0 = 0 → 叉积为 0 → 直接 return，
+    // 收尾那个 join 会被静默跳过（表现就是首尾没接好、缺一个接头）。
+    const raw = this.path.flatten(0.2);
+    for (const ct of raw) {
+      const src = ct.points;
+      const out: Pt2[] = [];
+      for (let i = 0; i < src.length; i++) {
+        const a = src[i]!;
+        const b = out[out.length - 1];
+        if (!b || Math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-4) out.push(a);
+      }
+      if (ct.closed && out.length >= 2) {
+        const a = out[0]!;
+        const b = out[out.length - 1]!;
+        if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= 1e-4) out.pop();
+      }
+      ct.points = out;
+    }
+    const contours = this.applyLineDash(raw);
     if (contours.length === 0) return;
     this.paint = this.resolvePaint(this.state.strokeStyle);
     const hw = this.state.lineWidth / 2;
