@@ -9,7 +9,7 @@ import { Color } from "../math/color.js";
 import { BufferUsage, TextureUsage, type TextureFormat } from "../gpu/types.js";
 import type { PaintStyle } from "./style.js";
 import { sampleStyle } from "./style.js";
-import { hexColor, type GradientStop } from "./color.js";
+import { cssColorRgba, type GradientStop, type RGBA } from "./color.js";
 import { LinearGradient } from "./LinearGradient.js";
 import { RadialGradient } from "./RadialGradient.js";
 import { CanvasPattern, type PatternRepetition } from "./pattern.js";
@@ -34,6 +34,13 @@ import { detectRectContour, intersectRects, lineIntersect, normalOffset, sameCli
 const GRADIENT_LUT_SIZE = 512;
 /** LUT 缓存上限（超出按插入顺序淘汰最旧的） */
 const GRADIENT_LUT_CACHE = 64;
+/**
+ * 跨帧保留的阴影图层组上限（每组 = 一张全屏 MSAA 遮罩 + 一张结果纹理）。
+ *
+ * 超过就按 LRU 淘汰没被本帧用到的组 —— 阴影参数随帧变化时（动画阴影）不至于每帧
+ * 都新建全屏目标把显存吃光。一帧内用到多少组就同时存在多少组（这是语义决定的）。
+ */
+const SHADOW_LAYER_CACHE = 4;
 
 /**
  * 一次 `fill()`/`stroke()` 用到的画笔。
@@ -115,12 +122,18 @@ export class Canvas2D {
     { r: number; g: number; b: number; a: number; blur: number; offsetX: number; offsetY: number }
   >();
   /**
-   * 每一组阴影的图层纹理（跨帧复用，键与 `shadowGroups` 一致）。
+   * 每一组阴影的图层纹理（键与 `shadowGroups` 一致）。
    *
    * **必须每组一份**：图层渲染是当场 submit 的，而合成只是记进调用方的 pass、
    * 要等调用方 submit 才回放 —— 共用一张纹理会让后一组的遮罩覆写前一组的。
+   *
+   * 但**不能无限增长**：`shadowBlur`/`shadowOffsetX` 一旦随时间变化（动画阴影很常见），
+   * 每帧的参数组键都不一样，于是每帧都会新建一整套全屏目标（MSAA 遮罩 + 结果），
+   * 几秒钟就能把显存吃光 → 卡死。所以按 LRU 缓存，见 `pruneShadowLayers()`。
    */
   private readonly shadowLayers = new Map<string, { mask: RenderTarget; dst: RenderTarget | null; texture: Texture }>();
+  /** 本帧用到过的阴影组（这些不能在本帧淘汰：合成要等到回放时才读它们的纹理） */
+  private readonly shadowLayersUsed = new Set<string>();
   /** 图层模式：本帧内容先画在这两张上 ping-pong（只在出现「目标当纹理」的混合模式时才建） */
   private layerA: RenderTarget | null = null;
   private layerB: RenderTarget | null = null;
@@ -366,7 +379,14 @@ export class Canvas2D {
         vcolor: [1, 1, 1, alpha],
       };
     }
-    const c = typeof style === "string" ? hexColor(style) : (style as Color);
+    // 字符串颜色走缓存解析（命名色/hsl 都认）；解析不了按「不画」处理
+    if (typeof style === "string") {
+      const c = cssColorRgba(style);
+      return c
+        ? { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [c.r, c.g, c.b, c.a * alpha] }
+        : { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [0, 0, 0, 0] };
+    }
+    const c = style as Color;
     return { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [c.r, c.g, c.b, c.a * alpha] };
   }
 
@@ -651,6 +671,7 @@ export class Canvas2D {
     this.ops.length = 0;
     this.stack.length = 0;
     this.shadowGroups.clear();
+    this.shadowLayersUsed.clear();
     // 裁剪是“每帧重新建立”的状态：避免上一帧异常/未 restore 时把后续整帧都裁掉
     this.state.clip = null;
     this.path.begin();
@@ -911,6 +932,9 @@ export class Canvas2D {
       pass.setScissorRect(0, 0, lw, lh);
       present.drawLayer(pass, layerFront.texture, lw, lh, this.layerFlipY());
     }
+
+    // 阴影图层目标按 LRU 回收（本帧用过的不能动：合成要等回放）
+    if (this.shadowLayers.size > SHADOW_LAYER_CACHE) this.pruneShadowLayers();
   }
 
   /** 图层模式用的颜色格式（与调用方 pass 一致） */
@@ -1267,26 +1291,23 @@ export class Canvas2D {
   //     的遮罩会把前一组的覆写掉，回放时所有合成读到的都是最后一组的内容
   //     （表现为「只有最后一个带阴影的图元有阴影」）。
 
-  /** `shadowColor` 解析结果（解析不了按全透明 = 不画阴影，不抛异常） */
-  private shadowColorRgba(): { r: number; g: number; b: number; a: number } {
-    const s = this.state.shadowColor.trim();
-    if (s === "" || s === "transparent") return { r: 0, g: 0, b: 0, a: 0 };
-    const m = /^rgba?\(([^)]+)\)$/i.exec(s);
-    if (m) {
-      const parts = m[1]!.split(/[,\s/]+/).filter((v) => v.length > 0).map((v) => Number.parseFloat(v));
-      return {
-        r: clamp01((parts[0] ?? 0) / 255),
-        g: clamp01((parts[1] ?? 0) / 255),
-        b: clamp01((parts[2] ?? 0) / 255),
-        a: parts.length > 3 ? clamp01(parts[3]!) : 1,
-      };
-    }
-    try {
-      const c = hexColor(s);
-      return { r: c.r, g: c.g, b: c.b, a: c.a };
-    } catch {
-      return { r: 0, g: 0, b: 0, a: 0 };
-    }
+  /** 阴影颜色解析缓存（颜色串 → RGBA）；`shadowColorRgba()` 每次 op 都会问 */
+  private shadowColorKey = "";
+  private shadowColorValue: RGBA = { r: 0, g: 0, b: 0, a: 0 };
+
+  /**
+   * `shadowColor` 解析结果（解析不了按全透明 = 不画阴影，不抛异常）。
+   *
+   * 每次 `fill()`/`stroke()`/`fillText()` 都会问一次「要不要阴影」，所以这里按
+   * 颜色串缓存（颜色只在 `shadowColor` 变化时变）——不能每次都正则解析。
+   */
+  private shadowColorRgba(): RGBA {
+    const s = this.state.shadowColor;
+    if (s === this.shadowColorKey) return this.shadowColorValue;
+    const c = cssColorRgba(s) ?? { r: 0, g: 0, b: 0, a: 0 };
+    this.shadowColorKey = s;
+    this.shadowColorValue = c;
+    return c;
   }
 
   /** 当前是否要画阴影（`shadowColor` 透明 = 不画，与原生一致） */
@@ -1414,6 +1435,11 @@ export class Canvas2D {
     // 等到回放时所有合成读到的都是**最后一组**的内容（表现：只有最后一个带阴影的
     // 图元有阴影，其余全丢）。
     let layer = this.shadowLayers.get(groupKey) ?? null;
+    if (layer) {
+      // LRU：用到就挪到末尾
+      this.shadowLayers.delete(groupKey);
+      this.shadowLayers.set(groupKey, layer);
+    }
     if (layer && layer.mask.sampleCount !== samples) {
       layer.mask.dispose();
       layer = null;
@@ -1427,6 +1453,7 @@ export class Canvas2D {
       };
       this.shadowLayers.set(groupKey, layer);
     }
+    this.shadowLayersUsed.add(groupKey);
     layer.mask.resize(w, h);
     const mask = layer.mask;
 
@@ -1477,6 +1504,24 @@ export class Canvas2D {
     if (this.shadowTmp) this.shadowTmp.resize(w, h);
     else this.shadowTmp = new RenderTarget(this.device, { label: "2d-shadow-tmp", width: w, height: h, format, depth: false, sampleCount: 1 });
     return this.shadowTmp;
+  }
+
+  /**
+   * 淘汰没被本帧用到的阴影图层目标（LRU，上限 `SHADOW_LAYER_CACHE`）。
+   *
+   * 为什么必须有：阴影参数里只要有一个随帧变化（动画的 `shadowOffsetX`/`shadowBlur`/
+   * 半透明动画色），每帧的组键都不同，不淘汰就是**每帧新建一整套全屏 MSAA 目标**，
+   * 显存几秒钟就被吃光、帧率断崖式下跌。淘汰只针对「本帧没用到」的组：本帧用过的
+   * 组合成还没回放，纹理不能销毁。
+   */
+  private pruneShadowLayers(): void {
+    for (const [key, layer] of this.shadowLayers) {
+      if (this.shadowLayers.size <= SHADOW_LAYER_CACHE) break;
+      if (this.shadowLayersUsed.has(key)) continue;
+      layer.mask.dispose();
+      layer.dst?.dispose();
+      this.shadowLayers.delete(key);
+    }
   }
 
   /** 把某一组模糊后的遮罩按该组阴影色合成到调用方的 pass（source-over，直通 alpha） */
@@ -1618,9 +1663,7 @@ export class Canvas2D {
     }
     const contours = this.applyLineDash(raw);
     if (contours.length === 0) return;
-    this.paint = this.resolvePaint(this.state.strokeStyle);
     const hw = this.state.lineWidth / 2;
-    const iStart = this.flatI.length;
     const strokePolys: Pt2[][] = [];
     for (const c of contours) if (c.points.length >= 3) strokePolys.push(c.points);
 
@@ -1663,42 +1706,86 @@ export class Canvas2D {
       fan(px, py, aDir - Math.PI / 2, aDir + Math.PI / 2);
     };
 
-    for (const contour of contours) {
-      const pts = contour.points;
-      const n = pts.length;
-      if (n < 2) continue;
-      if (contour.closed) {
-        // 每段矩形
-        for (let i = 0; i < n; i++) {
-          const p = pts[i]!;
-          const q = pts[(i + 1) % n]!;
-          const off = normalOffset(p[0], p[1], q[0], q[1], hw);
-          segmentQuad(p[0], p[1], q[0], q[1], off.x, off.y);
+    // 描边的**阴影**：原生 `stroke()` 同样投影。几何与本体完全一样，只是整体平移 +
+    // 纯白覆盖率，所以把上面那段发射逻辑包成闭包跑两遍（阴影那遍先记 op，
+    // 这样合成位置在本体之前 —— 否则阴影会盖住本体）。
+    const emitStrokeGeometry = (): void => {
+      for (const contour of contours) {
+        const pts = contour.points;
+        const n = pts.length;
+        if (n < 2) continue;
+        if (contour.closed) {
+          // 每段矩形
+          for (let i = 0; i < n; i++) {
+            const p = pts[i]!;
+            const q = pts[(i + 1) % n]!;
+            const off = normalOffset(p[0], p[1], q[0], q[1], hw);
+            segmentQuad(p[0], p[1], q[0], q[1], off.x, off.y);
+          }
+          // 连接处
+          for (let i = 0; i < n; i++) {
+            this.joinCorner(pts[(i - 1 + n) % n]!, pts[i]!, pts[(i + 1) % n]!, hw);
+          }
+        } else {
+          for (let i = 0; i < n - 1; i++) {
+            const p = pts[i]!;
+            const q = pts[i + 1]!;
+            const off = normalOffset(p[0], p[1], q[0], q[1], hw);
+            segmentQuad(p[0], p[1], q[0], q[1], off.x, off.y);
+          }
+          for (let i = 1; i < n - 1; i++) {
+            this.joinCorner(pts[i - 1]!, pts[i]!, pts[i + 1]!, hw);
+          }
+          // 端点 cap
+          const d0 = unitDir(pts[0]![0], pts[0]![1], pts[1]![0], pts[1]![1]);
+          const off0 = normalOffset(pts[0]![0], pts[0]![1], pts[1]![0], pts[1]![1], hw);
+          cap(pts[0]![0], pts[0]![1], -d0.x, -d0.y, off0.x, off0.y);
+          const dLast = unitDir(pts[n - 2]![0], pts[n - 2]![1], pts[n - 1]![0], pts[n - 1]![1]);
+          const offLast = normalOffset(pts[n - 2]![0], pts[n - 2]![1], pts[n - 1]![0], pts[n - 1]![1], hw);
+          cap(pts[n - 1]![0], pts[n - 1]![1], dLast.x, dLast.y, offLast.x, offLast.y);
         }
-        // 连接处
-        for (let i = 0; i < n; i++) {
-          this.joinCorner(pts[(i - 1 + n) % n]!, pts[i]!, pts[(i + 1) % n]!, hw);
-        }
-      } else {
-        for (let i = 0; i < n - 1; i++) {
-          const p = pts[i]!;
-          const q = pts[i + 1]!;
-          const off = normalOffset(p[0], p[1], q[0], q[1], hw);
-          segmentQuad(p[0], p[1], q[0], q[1], off.x, off.y);
-        }
-        for (let i = 1; i < n - 1; i++) {
-          this.joinCorner(pts[i - 1]!, pts[i]!, pts[i + 1]!, hw);
-        }
-        // 端点 cap
-        const d0 = unitDir(pts[0]![0], pts[0]![1], pts[1]![0], pts[1]![1]);
-        const off0 = normalOffset(pts[0]![0], pts[0]![1], pts[1]![0], pts[1]![1], hw);
-        cap(pts[0]![0], pts[0]![1], -d0.x, -d0.y, off0.x, off0.y);
-        const dLast = unitDir(pts[n - 2]![0], pts[n - 2]![1], pts[n - 1]![0], pts[n - 1]![1]);
-        const offLast = normalOffset(pts[n - 2]![0], pts[n - 2]![1], pts[n - 1]![0], pts[n - 1]![1], hw);
-        cap(pts[n - 1]![0], pts[n - 1]![1], dLast.x, dLast.y, offLast.x, offLast.y);
       }
-    }
-    this.recordFlat(iStart, strokePolys);
+    };
+
+    this.emitShadowGeometry(emitStrokeGeometry, strokePolys);
+
+    this.paint = this.resolvePaint(this.state.strokeStyle);
+    const bodyStart = this.flatI.length;
+    emitStrokeGeometry();
+    this.recordFlat(bodyStart, strokePolys);
+  }
+
+  /**
+   * 把「一段几何发射逻辑」额外按阴影参数画一份（纯白覆盖率），并记一个 shadow op。
+   *
+   * `emit` 必须直接用 `this.paint` 推顶点；本方法负责换画笔、叠阴影位移、恢复 CTM。
+   * 注意索引区间：阴影几何从**当前** `flatI` 长度开始，本体几何在调用之后另起一段
+   * （调用方必须在本方法返回后重新取 `flatI.length` 作为本体的 iStart）。
+   *
+   * @returns 是否真的发射了阴影几何（没开阴影时 false）
+   */
+  private emitShadowGeometry(emit: () => void, polys: readonly Pt2[][]): boolean {
+    if (!this.shadowEnabled()) return false;
+    const key = this.shadowGroupKey();
+    const start = this.flatI.length;
+    const base = copyAffine(this.state.ctm);
+    const savedPaint = this.paint;
+    this.paint = { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [1, 1, 1, 1] };
+    multiplyAffine(base, { a: 1, b: 0, c: 0, d: 1, e: this.state.shadowOffsetX, f: this.state.shadowOffsetY }, this.state.ctm);
+    emit();
+    this.state.ctm = base;
+    this.paint = savedPaint;
+    this.ops.push({
+      kind: "flat",
+      clip: this.state.clip ? { ...this.state.clip } : null,
+      iStart: start,
+      iEnd: this.flatI.length,
+      lut: null,
+      comp: "source-over",
+      shadow: key,
+    });
+    void polys;
+    return true;
   }
 
   private joinCorner(p0: Pt2, p1: Pt2, p2: Pt2, hw: number): void {
@@ -1975,7 +2062,3 @@ export class Canvas2D {
 }
 
 
-/** 夹到 [0,1]（阴影颜色解析用） */
-function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}

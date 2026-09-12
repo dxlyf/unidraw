@@ -311,6 +311,13 @@ textIBuf.write(textIndices);   // ← 把**当前 VAO**（flat 的 VAO）的索�
   整幅几乎空白」，而 WebGPU 完全正常（它每张目标各自持有 MSAA 纹理）。现在
   renderbuffer 按**纹理身份**缓存，纹理销毁时经 `releaseMsaaResources()` 回收。
   回归：`examples/_verify-2d-parity?scene=shadowblend`（阴影 + 图层混合同帧）。
+- **`FullScreenPass` 的 bind group 必须按纹理身份缓存，不能按 label**：同一个全屏 pass
+  会被反复用于多张目标，而这些目标的 label 常常是同一个（render2d 每一组阴影遮罩都叫
+  `2d-shadow-mask-color`、结果都叫 `2d-shadow-dst-color`）。按 label 缓存时，第 2 组会
+  命中第 1 组的 bind group → 模糊/合成**读的是第 1 组的遮罩**：阴影张冠李戴、
+  甚至被画到别的图形上（`?scene=colorshadow` / `shadowblend` 就是回归场景；
+  修前 colorshadow 整幅 6.997、其中「命名色阴影」分区 39.47，修后 0.456 / 0.60）。
+  同类问题也发生在 `Texture.label` 重复的任何地方 —— 缓存键尽量用对象身份。
 
 ## 7. 纹理上传
 

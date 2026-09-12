@@ -509,6 +509,68 @@ function drawClearRect(c: SceneCtx): void {
   c.clearRect(360, 170, 40, 0);
 }
 
+/** 颜色解析 + 描边阴影：命名色/hsl/8 位 hex 填充色、命名色阴影、stroke() 的阴影 */
+const COLOR2_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "命名色填充", x: 8, y: 8, w: 150, h: 120 },
+  { name: "hsl+8位hex", x: 158, y: 8, w: 150, h: 120 },
+  { name: "命名色阴影", x: 308, y: 8, w: 164, h: 120 },
+  { name: "描边阴影", x: 8, y: 132, w: 464, h: 130 },
+];
+
+function drawColorShadows(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  // 1) 命名色填充
+  c.fillStyle = "black";
+  c.fillRect(30, 30, 100, 60);
+  c.fillStyle = "red";
+  c.beginPath();
+  c.arc(80, 100, 20, 0, Math.PI * 2);
+  c.fill();
+
+  // 2) hsl + 8 位 hex（带 alpha）
+  c.fillStyle = "hsl(200, 80%, 60%)";
+  c.fillRect(180, 30, 100, 60);
+  c.fillStyle = "#ff880080";
+  c.fillRect(200, 70, 100, 50);
+
+  // 3) **命名色阴影**（原来只认 #hex 与 rgb()，`"black"` 会解析失败 → 完全不画阴影）
+  c.shadowColor = "black";
+  c.shadowBlur = 10;
+  c.shadowOffsetX = 6;
+  c.shadowOffsetY = 6;
+  c.fillStyle = "#35d7ee";
+  c.beginPath();
+  c.roundRect(330, 34, 110, 70, 10);
+  c.fill();
+  c.shadowColor = "rgba(0,0,0,0)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+
+  // 4) **描边阴影**（原生 stroke() 也投影；框架原来只给 fill 做阴影）
+  c.shadowColor = "rgba(0, 0, 0, 0.7)";
+  c.shadowBlur = 12;
+  c.shadowOffsetX = 8;
+  c.shadowOffsetY = 8;
+  c.strokeStyle = "#f5d02e";
+  c.lineWidth = 10;
+  c.lineJoin = "round";
+  c.beginPath();
+  c.roundRect(40, 160, 180, 80, 16);
+  c.stroke();
+  c.strokeStyle = "#ff5c7a";
+  c.lineWidth = 8;
+  c.beginPath();
+  c.arc(360, 200, 46, 0, Math.PI * 2);
+  c.stroke();
+  c.shadowColor = "rgba(0,0,0,0)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+}
+
 /** 描边场景：闭合路径首尾的 join（原生 vs 本框架） */
 const STROKE_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
   { name: "rect+miter", x: 8, y: 8, w: 116, h: 116 },
@@ -1006,6 +1068,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   blend: { label: "图层混合模式", draw: (c) => drawBlendModes(c), regions: BLEND_REGIONS },
   shadowblend: { label: "阴影+图层混合", draw: (c) => drawShadowBlend(c), regions: SHADOWBLEND_REGIONS },
   clear: { label: "clearRect", draw: (c) => drawClearRect(c), regions: CLEAR_REGIONS },
+  colorshadow: { label: "颜色解析+描边阴影", draw: (c) => drawColorShadows(c), regions: COLOR2_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
   stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },

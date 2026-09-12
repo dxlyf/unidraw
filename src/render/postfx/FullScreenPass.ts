@@ -121,7 +121,6 @@ export class FullScreenPass implements PostEffect {
   private readonly _extraCount: number;
   private readonly _extras: Texture[] = [];
   private _placeholder: Texture | null = null;
-  private _cached: { key: string; group: BindGroup } | null = null;
 
   constructor(device: Device, options: FullScreenPassOptions) {
     this.device = device;
@@ -214,7 +213,6 @@ export class FullScreenPass implements PostEffect {
   dispose(): void {
     this._placeholder?.destroy();
     this._placeholder = null;
-    this._cached = null;
     this.params.buffer.destroy();
     this.sampler.destroy();
     this.pipeline.destroy();
@@ -233,9 +231,20 @@ export class FullScreenPass implements PostEffect {
     return tex;
   }
 
+  /**
+   * 输入纹理 → bind group。
+   *
+   * **必须按纹理身份（对象）缓存，不能按 `label` 缓存**：同一个 pass 会被反复用于
+   * 多张目标，而这些目标的 label 往往一样（render2d 的每一组阴影遮罩都叫
+   * `2d-shadow-mask-color`）—— 按 label 缓存会让第 2 组拿到第 1 组的 bind group，
+   * 于是「模糊/合成读的是上一组的遮罩」：阴影张冠李戴、甚至叠在别的图形上。
+   */
+  private readonly _bindGroups = new WeakMap<Texture, { extrasKey: string; group: BindGroup }>();
+
   private _bindGroupFor(input: Texture): BindGroup {
-    const key = `${input.label ?? ""}#${this._extras.map((t) => t?.label ?? "?").join(",")}`;
-    if (this._cached?.key === key) return this._cached.group;
+    const extrasKey = this._extras.map((t) => (t ? t.label ?? "?" : "-")).join(",");
+    const hit = this._bindGroups.get(input);
+    if (hit && hit.extrasKey === extrasKey) return hit.group;
     const placeholder = this._placeholder ?? this._makePlaceholder();
     const entries = [
       { binding: 0, resource: this.params.buffer },
@@ -246,7 +255,7 @@ export class FullScreenPass implements PostEffect {
       entries.push({ binding: 3 + i, resource: (this._extras[i] ?? placeholder).view() });
     }
     const group = this.device.createBindGroup({ label: `postfx-${this.name}-group`, layout: this.layout, entries });
-    this._cached = { key, group };
+    this._bindGroups.set(input, { extrasKey, group });
     return group;
   }
 }

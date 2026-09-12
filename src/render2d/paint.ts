@@ -3,7 +3,7 @@ import type { GradientStop, RGBA } from "./color.js";
 import { LinearGradient } from "./LinearGradient.js";
 import { RadialGradient } from "./RadialGradient.js";
 import { CanvasPattern } from "./pattern.js";
-import { hexColor } from "./color.js";
+import { cssColorRgba } from "./color.js";
 
 export type PaintStyle = string | Color | LinearGradient | RadialGradient | CanvasPattern;
 export { CanvasPattern };
@@ -34,8 +34,10 @@ export function sampleStops(stops: GradientStop[], t: number): RGBA {
 /** 解析样式在用户坐标 (x,y) 处的颜色 */
 export function sampleStyle(style: PaintStyle, x: number, y: number): RGBA {
   if (typeof style === "string") {
-    const c = hexColor(style);
-    return { r: c.r, g: c.g, b: c.b, a: c.a };
+    // 走缓存解析（命名色/hsl/rgba 都认）；解析不了按全透明处理（与「无效颜色」
+    // 在原生里的表现接近），避免默默画成白色
+    const c = cssColorRgba(style);
+    return c ? { r: c.r, g: c.g, b: c.b, a: c.a } : { r: 0, g: 0, b: 0, a: 0 };
   }
   if (style instanceof Color) return { r: style.r, g: style.g, b: style.b, a: style.a };
   if (style instanceof LinearGradient) {

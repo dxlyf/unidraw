@@ -47,9 +47,17 @@ export const DST_TEXTURE_BLEND_MODES = [
   "luminosity",
 ] as const;
 
+/**
+ * 模式名 → 分支编号的查表。
+ *
+ * 用 `Map` 而不是 `indexOf`：这个查询在 `flush()` 里**逐 op** 调用，
+ * 每个 op 都扫一遍数组纯属白花。
+ */
+const DST_TEXTURE_BLEND_INDEX = new Map<string, number>(DST_TEXTURE_BLEND_MODES.map((m, i) => [m, i]));
+
 /** 该合成模式是否要靠「目标当纹理」的着色器实现（是则返回分支编号，否则 -1） */
 export function dstTextureBlendIndex(operation: string): number {
-  return DST_TEXTURE_BLEND_MODES.indexOf(operation as (typeof DST_TEXTURE_BLEND_MODES)[number]);
+  return DST_TEXTURE_BLEND_INDEX.get(operation) ?? -1;
 }
 
 export class BlendModePass extends FullScreenPass {
