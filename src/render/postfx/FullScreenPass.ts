@@ -61,6 +61,11 @@ export interface PostEffect {
   dispose?(): void;
 }
 
+const OVER_BLEND = {
+  color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+  alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+};
+
 export interface FullScreenPassOptions {
   name: string;
   /** 片元源码（GLSL 为 `#version 300 es`，入口 `main`；两侧都要给） */
@@ -85,6 +90,20 @@ export interface FullScreenPassOptions {
    * （表现为整帧命令缓冲作废、`readPixels` 回读全是 0）。
    */
   textureSampleType?: "float" | "depth";
+  /**
+   * 输出是否带 **source-over 混合**（默认 false = 直接覆盖，后处理链用不上混合）。
+   * render2d 的阴影合成需要它：输出的是「直通 alpha」的颜色，必须与目标做 over。
+   */
+  blend?: boolean;
+  /**
+   * 输出附件的采样数（默认 1）。
+   *
+   * 后处理链自己开的目标都是单采样，所以默认 1 就够；但 **render2d 的阴影合成是
+   * 画进调用方那个 pass 的**，调用方开了 MSAA（`msaa: 4`）时管线必须跟着声明 4，
+   * 否则 WebGPU 直接校验失败：`Attachment state of [RenderPipeline ...] is not
+   * compatible with [RenderPassEncoder ...]`（整帧命令作废，回读全 0）。
+   */
+  sampleCount?: number;
 }
 
 export class FullScreenPass implements PostEffect {
@@ -148,8 +167,9 @@ export class FullScreenPass implements PostEffect {
       bindGroupLayouts: [this.layout],
       vertex: { buffers: [] },
       primitive: { topology: "triangle-list", cullMode: "none", frontFace: "ccw" },
+      multisample: { count: Math.max(1, Math.floor(options.sampleCount ?? 1)) },
       depthStencil: null,
-      targets: [{ format: targetFormat }],
+      targets: [{ format: targetFormat, ...(options.blend ? { blend: OVER_BLEND } : {}) }],
     });
   }
 

@@ -36,6 +36,14 @@ export interface Op {
   sampler?: import("../device/resources.js").Sampler;
   /** 文字图集纹理（kind === "text"） */
   texture?: Texture;
+  /**
+   * 这个 op 只画进阴影遮罩（不画进最终画面）。
+   *
+   * 值是**阴影参数组的键**（颜色+模糊+位移）：一帧里出现多组不同阴影参数时，
+   * 每组各自一张遮罩图层，并按「该组第一个 op」的位置依次合成 —— 所以
+   * `shadowBlur === 0` 的硬阴影不会被另一组的模糊半径带糊。
+   */
+  shadow?: string;
 }
 
 export interface SavedState {
@@ -55,6 +63,12 @@ export interface SavedState {
   lineDashOffset: number;
   /** 合成模式（`globalCompositeOperation`） */
   globalCompositeOperation: string;
+  /** 阴影颜色（CSS 颜色串；透明 = 不画阴影，与原生默认一致） */
+  shadowColor: string;
+  /** 阴影模糊半径（0 = 硬边阴影） */
+  shadowBlur: number;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
   clip: DeviceRect | null;
 }
 

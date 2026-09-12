@@ -6,7 +6,7 @@ import { ColorWriteMask } from "../device/descriptors.js";
 import { UniformBlock } from "../render/UniformBlock.js";
 import { Mat4 } from "../math/mat4.js";
 import { Color } from "../math/color.js";
-import { BufferUsage, TextureUsage } from "../gpu/types.js";
+import { BufferUsage, TextureUsage, type TextureFormat } from "../gpu/types.js";
 import type { PaintStyle } from "./style.js";
 import { sampleStyle } from "./style.js";
 import { hexColor, type GradientStop } from "./color.js";
@@ -17,6 +17,8 @@ import { Path2D } from "./path.js";
 import { fillTriangles, type FillRule } from "./fill.js";
 import type { Contour } from "./pathTypes.js";
 import { blendForComposite } from "./composite.js";
+import { RenderTarget } from "../render/RenderTarget.js";
+import { BlurPass, ShadowCompositePass } from "./blurPass.js";
 import { logger } from "../util/logger.js";
 import { sourceSize, textureFromImageSource, type CanvasImageSourceLike } from "../render/texture/image.js";
 import type { Pt2 } from "./matrix.js";
@@ -95,6 +97,29 @@ export class Canvas2D {
   private readonly warnedComposite = new Set<string>();
   /** 图像源 → 纹理缓存（同一个 img/canvas 反复绘制只上传一次） */
   private readonly imageTextures = new WeakMap<object, Texture>();
+  /** 阴影遮罩（只存覆盖率）与模糊中转目标 */
+  private shadowTmp: RenderTarget | null = null;
+  private shadowBlurPass: BlurPass | null = null;
+  private shadowCompositePass: ShadowCompositePass | null = null;
+  /** 合成管线的「格式|采样数|翻转」键：调用方 pass 变了就得重建 */
+  private shadowCompositeKey = "";
+  /**
+   * 本帧用到的阴影参数组：键 = `颜色|模糊|位移x|位移y`（op.shadow 存的就是这个键）。
+   *
+   * 每组一张遮罩是「按需现渲染现合成」，所以只需要一套遮罩/中转目标（`shadowMask`
+   * / `shadowTmp`），组数再多也不涨显存。
+   */
+  private readonly shadowGroups = new Map<
+    string,
+    { r: number; g: number; b: number; a: number; blur: number; offsetX: number; offsetY: number }
+  >();
+  /**
+   * 每一组阴影的图层纹理（跨帧复用，键与 `shadowGroups` 一致）。
+   *
+   * **必须每组一份**：图层渲染是当场 submit 的，而合成只是记进调用方的 pass、
+   * 要等调用方 submit 才回放 —— 共用一张纹理会让后一组的遮罩覆写前一组的。
+   */
+  private readonly shadowLayers = new Map<string, { mask: RenderTarget; dst: RenderTarget | null; texture: Texture }>();
   /** 图案采样器（按重复方式缓存） */
   private readonly patternSamplers = new Map<PatternRepetition, Sampler>();
 
@@ -119,6 +144,10 @@ export class Canvas2D {
     lineDash: [],
     lineDashOffset: 0,
     globalCompositeOperation: "source-over",
+    shadowColor: "rgba(0,0,0,0)",
+    shadowBlur: 0,
+    shadowOffsetX: 0,
+    shadowOffsetY: 0,
     clip: null,
   };
 
@@ -436,6 +465,32 @@ export class Canvas2D {
   set lineDashOffset(v: number) {
     this.state.lineDashOffset = Number.isFinite(v) ? v : 0;
   }
+  /** 阴影颜色（CSS 颜色串）。默认 `rgba(0,0,0,0)` = 不画阴影，与原生一致。 */
+  get shadowColor(): string {
+    return this.state.shadowColor;
+  }
+  set shadowColor(v: string) {
+    this.state.shadowColor = v;
+  }
+  /** 阴影模糊半径（像素，`0` = 硬边阴影）；内部按原生约定取 σ ≈ blur/2。 */
+  get shadowBlur(): number {
+    return this.state.shadowBlur;
+  }
+  set shadowBlur(v: number) {
+    this.state.shadowBlur = v > 0 ? v : 0;
+  }
+  get shadowOffsetX(): number {
+    return this.state.shadowOffsetX;
+  }
+  set shadowOffsetX(v: number) {
+    this.state.shadowOffsetX = Number.isFinite(v) ? v : 0;
+  }
+  get shadowOffsetY(): number {
+    return this.state.shadowOffsetY;
+  }
+  set shadowOffsetY(v: number) {
+    this.state.shadowOffsetY = Number.isFinite(v) ? v : 0;
+  }
   /**
    * 合成模式（与原生同名）。
    *
@@ -479,6 +534,10 @@ export class Canvas2D {
       textBaseline: this.state.textBaseline,
       lineDash: [...this.state.lineDash],
       globalCompositeOperation: this.state.globalCompositeOperation,
+      shadowColor: this.state.shadowColor,
+      shadowBlur: this.state.shadowBlur,
+      shadowOffsetX: this.state.shadowOffsetX,
+      shadowOffsetY: this.state.shadowOffsetY,
       lineDashOffset: this.state.lineDashOffset,
       clip: this.state.clip ? { ...this.state.clip } : null,
     });
@@ -573,6 +632,7 @@ export class Canvas2D {
     this.textI.length = 0;
     this.ops.length = 0;
     this.stack.length = 0;
+    this.shadowGroups.clear();
     // 裁剪是“每帧重新建立”的状态：避免上一帧异常/未 restore 时把后续整帧都裁掉
     this.state.clip = null;
     this.path.begin();
@@ -601,6 +661,13 @@ export class Canvas2D {
       this.textIBuf!.write(new Uint16Array(this.textI));
     }
 
+    // 阴影走图层：遮罩/模糊各自独立 submit，产物不落在本 pass 上。
+    // 按参数组登记（Set 保序 = 各组第一个 op 出现的先后），每组在它第一个 op 的位置
+    // 现场渲染 + 合成：遮罩目标只有一套，组与组之间用完即覆盖。
+    const shadowKeys: string[] = [];
+    for (const op of this.ops) if (op.shadow !== undefined && !shadowKeys.includes(op.shadow)) shadowKeys.push(op.shadow);
+    const pendingGroups = new Set(shadowKeys);
+
     let lastClip: DeviceRect | null = null;
     let clipInit = false;
     /** 当前绑定在 binding 1 的纹理（渐变 LUT / 字形图集） */
@@ -610,6 +677,19 @@ export class Canvas2D {
     let lastPipeKey: string | null = null;
 
     for (const op of this.ops) {
+      if (op.shadow !== undefined) {
+        // 合成位置 = **该组第一个 op 之前**：早于它会被本帧先画的背景 op 盖掉，
+        // 晚于它就会盖住本体。合成会改掉 pass 的管线/绑定，所以缓存全部作废。
+        if (pendingGroups.delete(op.shadow)) {
+          this.renderShadowLayer(op.shadow, pass.sampleCount);
+          this.compositeShadow(pass, op.shadow);
+          lastPipeKey = null;
+          lastTex = null;
+          lastSampler = null;
+          clipInit = false;
+        }
+        continue; // 阴影 op 只在遮罩图层里画
+      }
       const c = op.clip;
       if (!clipInit || !sameClip(lastClip, c)) {
         if (c) pass.setScissorRect(c.x, c.y, c.w, c.h);
@@ -813,6 +893,15 @@ export class Canvas2D {
     return id;
   }
 
+  /** 文字四边形（字形图集遮罩 × 顶点色） */
+  private pushTextQuad(left: number, top: number, w: number, h: number, style: PaintStyle): void {
+    const v0 = this.pushTextV(left, top, 0, 0, style);
+    const v1 = this.pushTextV(left + w, top, 1, 0, style);
+    const v2 = this.pushTextV(left + w, top + h, 1, 1, style);
+    const v3 = this.pushTextV(left, top + h, 0, 1, style);
+    this.pushTri("text", v0, v1, v2);
+    this.pushTri("text", v0, v2, v3);
+  }
   private pushTri(arr: "flat" | "text", a: number, b: number, c: number): void {
     (arr === "flat" ? this.flatI : this.textI).push(a, b, c);
   }
@@ -889,6 +978,260 @@ export class Canvas2D {
    *   填充区域 —— 内环挖洞、重叠子路径只覆盖一次（半透明不会出现深色缝）、
    *   自相交路径也正确。
    */
+  // ======================================================================
+  // 阴影（shadowColor / shadowBlur / shadowOffsetX·Y）—— 图层方案
+  // ======================================================================
+  //
+  // 与「把几何按高斯权重重画 N 次」的近似不同，这里走**真的高斯模糊**：
+  //   ① 把阴影几何（白色 + 覆盖率）画进一张遮罩目标（独立 submit）；
+  //   ② 横、竖各做一次 9-tap 可分离模糊（各一次独立 submit）；
+  //   ③ 回到调用方的 pass：先用「阴影色 × 覆盖率」合成遮罩，再画本体。
+  // 之所以每次都要独立 submit：WebGPU 不允许同一 submit 内某张纹理既作附件写入
+  // 又被只读采样。
+  //
+  // 阴影按**参数组**（颜色+模糊+位移）分开：每组一张遮罩，并在「该组第一个 op」
+  // 的位置依次合成。于是同一帧里 `shadowBlur=0` 的硬阴影不会被另一组的模糊半径带糊。
+  //
+  // 两条容易踩的坑（都踩过）：
+  //   · **合成位置**必须落在该组第一个 op 之前：早了会被本帧先画的背景 op 盖掉，
+  //     晚了就盖住本体；
+  //   · **每组必须各留一份遮罩/结果纹理**：本文件里的 submit 是当场执行的，而合成
+  //     只是记进调用方的 pass、要等调用方 submit 才回放 —— 共用一张纹理时，后一组
+  //     的遮罩会把前一组的覆写掉，回放时所有合成读到的都是最后一组的内容
+  //     （表现为「只有最后一个带阴影的图元有阴影」）。
+
+  /** `shadowColor` 解析结果（解析不了按全透明 = 不画阴影，不抛异常） */
+  private shadowColorRgba(): { r: number; g: number; b: number; a: number } {
+    const s = this.state.shadowColor.trim();
+    if (s === "" || s === "transparent") return { r: 0, g: 0, b: 0, a: 0 };
+    const m = /^rgba?\(([^)]+)\)$/i.exec(s);
+    if (m) {
+      const parts = m[1]!.split(/[,\s/]+/).filter((v) => v.length > 0).map((v) => Number.parseFloat(v));
+      return {
+        r: clamp01((parts[0] ?? 0) / 255),
+        g: clamp01((parts[1] ?? 0) / 255),
+        b: clamp01((parts[2] ?? 0) / 255),
+        a: parts.length > 3 ? clamp01(parts[3]!) : 1,
+      };
+    }
+    try {
+      const c = hexColor(s);
+      return { r: c.r, g: c.g, b: c.b, a: c.a };
+    } catch {
+      return { r: 0, g: 0, b: 0, a: 0 };
+    }
+  }
+
+  /** 当前是否要画阴影（`shadowColor` 透明 = 不画，与原生一致） */
+  private shadowEnabled(): boolean {
+    return this.shadowColorRgba().a > 0;
+  }
+
+  /**
+   * 把「当前这一组阴影参数」登记进 `shadowGroups` 并返回它的键。
+   *
+   * 键同时充当 op 上的 `shadow` 标记：键相同 = 参数逐位相同 = 可以共用一张遮罩。
+   */
+  private shadowGroupKey(): string {
+    const key = `${this.state.shadowColor}|${this.state.shadowBlur}|${this.state.shadowOffsetX}|${this.state.shadowOffsetY}`;
+    if (!this.shadowGroups.has(key)) {
+      this.shadowGroups.set(key, {
+        ...this.shadowColorRgba(),
+        blur: this.state.shadowBlur,
+        offsetX: this.state.shadowOffsetX,
+        offsetY: this.state.shadowOffsetY,
+      });
+    }
+    return key;
+  }
+
+  /** 把一批三角形按阴影位移画一次（白色 + 覆盖率），并单独记一个 shadow op */
+  private emitShadowTris(tris: readonly Pt2[][], polys?: readonly Pt2[][]): void {
+    if (!this.shadowEnabled() || tris.length === 0) return;
+    const key = this.shadowGroupKey();
+    // 必须是**副本**：`multiplyAffine(base, ...)` 会把结果写回 base，而 base 若与
+    // `this.state.ctm` 是同一个对象，末尾的 `this.state.ctm = base` 就恢复不了 ——
+    // 阴影位移会一路泄漏到后面每个 op（整幅图形被逐次推走）。
+    const base = copyAffine(this.state.ctm);
+    const start = this.flatI.length;
+    this.paint = { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [1, 1, 1, 1] };
+    multiplyAffine(base, { a: 1, b: 0, c: 0, d: 1, e: this.state.shadowOffsetX, f: this.state.shadowOffsetY }, this.state.ctm);
+    for (const tri of tris) {
+      const ids: number[] = [this.pushFlat(tri[0]![0], tri[0]![1]), this.pushFlat(tri[1]![0], tri[1]![1]), this.pushFlat(tri[2]![0], tri[2]![1])];
+      this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
+    }
+    this.state.ctm = base;
+    this.ops.push({
+      kind: "flat",
+      clip: this.state.clip ? { ...this.state.clip } : null,
+      iStart: start,
+      iEnd: this.flatI.length,
+      lut: null,
+      comp: "source-over",
+      shadow: key,
+    });
+    void polys;
+  }
+
+  /** 文字阴影：字形图集本身就是 alpha 遮罩，白色顶点色即可写进阴影遮罩 */
+  private emitShadowText(left: number, top: number, w: number, h: number, texture: Texture): void {
+    if (!this.shadowEnabled()) return;
+    const key = this.shadowGroupKey();
+    // 同上：base 必须是副本，否则位移会泄漏到后续 op
+    const base = copyAffine(this.state.ctm);
+    const start = this.textI.length;
+    multiplyAffine(base, { a: 1, b: 0, c: 0, d: 1, e: this.state.shadowOffsetX, f: this.state.shadowOffsetY }, this.state.ctm);
+    this.pushTextQuad(left, top, w, h, "#ffffff");
+    this.state.ctm = base;
+    this.ops.push({
+      kind: "text",
+      clip: this.state.clip ? { ...this.state.clip } : null,
+      texture,
+      iStart: start,
+      iEnd: this.textI.length,
+      comp: "source-over",
+      shadow: key,
+    });
+  }
+
+  /** 只画某一组阴影 op 的迷你绘制循环（遮罩目标：source-over、纯白/字形遮罩） */
+  private drawShadowOps(pass: RenderPassEncoder, groupKey: string, sampleCount: number): void {
+    let lastKind: "flat" | "text" | null = null;
+    let lastTex: Texture | null = null;
+    for (const op of this.ops) {
+      if (op.shadow !== groupKey) continue;
+      const c = op.clip;
+      if (c) pass.setScissorRect(c.x, c.y, c.w, c.h);
+      else pass.setScissorRect(0, 0, this.viewW, this.viewH);
+      if (lastKind !== op.kind) {
+        lastKind = op.kind;
+        if (op.kind === "flat") {
+          pass.setPipeline(this.pipelineFor("flat", sampleCount, "source-over"));
+          if (this.flatVBuf && this.flatIBuf) {
+            pass.setVertexBuffer(0, this.flatVBuf);
+            pass.setIndexBuffer(this.flatIBuf, "uint16");
+          }
+        } else {
+          pass.setPipeline(this.pipelineFor("tex", sampleCount, "source-over"));
+          if (this.textVBuf && this.textIBuf) {
+            pass.setVertexBuffer(0, this.textVBuf);
+            pass.setIndexBuffer(this.textIBuf, "uint16");
+          }
+        }
+      }
+      const wantTex = (op.kind === "flat" ? this.solidLut : op.texture) as Texture;
+      if (lastTex !== wantTex) {
+        pass.setBindGroup(0, this.textureGroup(wantTex));
+        lastTex = wantTex;
+      }
+      const n = op.iEnd - op.iStart;
+      if (n > 0) pass.drawIndexed(n, 1, op.iStart, 0, 0);
+    }
+  }
+
+  /** 某一组阴影的遮罩 + 模糊：三次独立 submit（遮罩 → 横向 → 纵向） */
+  private renderShadowLayer(groupKey: string, sampleCount: number): void {
+    const group = this.shadowGroups.get(groupKey);
+    if (!group) return;
+    const w = Math.max(1, this.viewW);
+    const h = Math.max(1, this.viewH);
+    const format = (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as TextureFormat;
+    // 遮罩按**调用方的采样数**建：`shadowBlur = 0` 的硬阴影不做模糊，遮罩边缘就是
+    // 最终边缘，1x 采样会留下明显锯齿（原生那条边是抗锯齿的）。MSAA 目标的
+    // `texture` 是解析后的普通可采样纹理，所以后面照常采样。
+    const samples = Math.max(1, Math.floor(sampleCount));
+
+    // 关键：**每组各留一份遮罩/结果纹理**。
+    // 本函数里的 submit 是立刻执行的，而「合成」只是记进调用方的 pass，要等调用方
+    // 自己 submit 才执行 —— 共用一张纹理的话，后面几组会把前面几组的遮罩覆写掉，
+    // 等到回放时所有合成读到的都是**最后一组**的内容（表现：只有最后一个带阴影的
+    // 图元有阴影，其余全丢）。
+    let layer = this.shadowLayers.get(groupKey) ?? null;
+    if (layer && layer.mask.sampleCount !== samples) {
+      layer.mask.dispose();
+      layer = null;
+      this.shadowLayers.delete(groupKey);
+    }
+    if (!layer) {
+      layer = {
+        mask: new RenderTarget(this.device, { label: "2d-shadow-mask", width: w, height: h, format, depth: false, sampleCount: samples }),
+        dst: null,
+        texture: null as unknown as Texture,
+      };
+      this.shadowLayers.set(groupKey, layer);
+    }
+    layer.mask.resize(w, h);
+    const mask = layer.mask;
+
+    const enc = this.device.createCommandEncoder("2d-shadow-mask");
+    const p = enc.beginRenderPass({
+      label: "2d-shadow-mask",
+      colorAttachments: [mask.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
+      depthStencilAttachment: null,
+    });
+    this.drawShadowOps(p, groupKey, samples);
+    p.end();
+    this.device.submit([enc.finish()]);
+
+    // blur = 0 时遮罩本身就是要的硬阴影，跳过模糊（同时也避开 radius→0 的数值问题）
+    layer.texture = mask.texture;
+    if (!(group.blur > 0)) return;
+    // 模糊的每一趟都写**单采样**目标：遮罩是 MSAA 时不能当附件（模糊管线是 1x，
+    // 采样数对不上 WebGPU 直接校验失败 → 整条命令缓冲作废）。中转目标 `tmp` 只在
+    // 本函数内部用（合成不采样它），所以可以全局共用；结果 `dst` 要被合成采样，
+    // 必须每组一份（同上面的理由）。
+    const tmp = this.ensureShadowTmp(w, h, format);
+    if (layer.dst) layer.dst.resize(w, h);
+    else layer.dst = new RenderTarget(this.device, { label: "2d-shadow-dst", width: w, height: h, format, depth: false, sampleCount: 1 });
+    const dst = layer.dst;
+    if (!this.shadowBlurPass) this.shadowBlurPass = new BlurPass(this.device, format);
+    // 9-tap 核自身 σ_k ≈ 2 个步长；原生 σ ≈ blur/2 → 步长 = blur/4
+    const radius = Math.max(0.5, group.blur / 4);
+    const steps: [Texture, RenderTarget, number, number][] = [
+      [mask.texture, tmp, 1, 0],
+      [tmp.texture, dst, 0, 1],
+    ];
+    for (const [src, target, dx, dy] of steps) {
+      const e2 = this.device.createCommandEncoder("2d-shadow-blur");
+      const p2 = e2.beginRenderPass({
+        label: "2d-shadow-blur",
+        colorAttachments: [target.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
+        depthStencilAttachment: null,
+      });
+      this.shadowBlurPass.drawDirection(p2, src, w, h, dx, dy, radius);
+      p2.end();
+      this.device.submit([e2.finish()]);
+    }
+    layer.texture = dst.texture;
+  }
+
+  /** 惰性创建/复用阴影模糊的横向中转目标（1x 单采样，全局共用） */
+  private ensureShadowTmp(w: number, h: number, format: TextureFormat): RenderTarget {
+    if (this.shadowTmp) this.shadowTmp.resize(w, h);
+    else this.shadowTmp = new RenderTarget(this.device, { label: "2d-shadow-tmp", width: w, height: h, format, depth: false, sampleCount: 1 });
+    return this.shadowTmp;
+  }
+
+  /** 把某一组模糊后的遮罩按该组阴影色合成到调用方的 pass（source-over，直通 alpha） */
+  private compositeShadow(pass: RenderPassEncoder, groupKey: string): void {
+    const group = this.shadowGroups.get(groupKey);
+    const layer = this.shadowLayers.get(groupKey);
+    const tex = layer?.texture ?? null;
+    if (!tex || !group) return;
+    const w = Math.max(1, this.viewW);
+    const h = Math.max(1, this.viewH);
+    const format = (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as TextureFormat;
+    // 管线必须和调用方 pass 的附件状态一致：格式 + 采样数（MSAA 时是 4，不是 1）
+    const flipY = this.device.kind === "webgpu";
+    const key = `${format}|${pass.sampleCount}|${flipY ? 1 : 0}`;
+    if (this.shadowCompositeKey !== key || !this.shadowCompositePass) {
+      this.shadowCompositePass?.dispose();
+      this.shadowCompositePass = new ShadowCompositePass(this.device, format, { sampleCount: pass.sampleCount, flipY });
+      this.shadowCompositeKey = key;
+    }
+    pass.setScissorRect(0, 0, w, h);
+    this.shadowCompositePass.drawTint(pass, tex, w, h, group.r, group.g, group.b, group.a);
+  }
   fill(rule: FillRule = "nonzero"): void {
     const contours = this.path.flatten(0.2);
     if (contours.length === 0) return;
@@ -897,13 +1240,17 @@ export class Canvas2D {
       if (contour.points.length >= 3) polys.push(contour.points);
     }
     if (polys.length === 0) return;
+    const tris = fillTriangles(polys, rule);
+    const savedPaint = this.paint;
+    this.emitShadowTris(tris, polys);
     this.paint = this.resolvePaint(this.state.fillStyle);
     const iStart = this.flatI.length;
-    for (const tri of fillTriangles(polys, rule)) {
+    for (const tri of tris) {
       const ids: number[] = [this.pushFlat(tri[0]![0], tri[0]![1]), this.pushFlat(tri[1]![0], tri[1]![1]), this.pushFlat(tri[2]![0], tri[2]![1])];
       this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
     }
     this.recordFlat(iStart, polys);
+    this.paint = savedPaint;
   }
 
   // 便捷绘制
@@ -1277,6 +1624,7 @@ export class Canvas2D {
     const squeeze = maxWidth !== undefined && m.width > maxWidth && m.width > 0 ? maxWidth / m.width : 1;
     const w = glyph.width * squeeze;
 
+    this.emitShadowText(left, top, w, glyph.height, glyph.texture);
     const iStart = this.textI.length;
     const v0 = this.pushTextV(left, top, 0, 0, style);
     const v1 = this.pushTextV(left + w, top, 1, 0, style);
@@ -1293,4 +1641,10 @@ export class Canvas2D {
   clearTextCache(): void {
     this.textRenderer.clear();
   }
+}
+
+
+/** 夹到 [0,1]（阴影颜色解析用） */
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }

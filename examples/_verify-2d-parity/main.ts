@@ -59,6 +59,10 @@ interface SceneCtx {
   textAlign: string;
   textBaseline: string;
   globalCompositeOperation: string;
+  shadowColor: string;
+  shadowBlur: number;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
   drawImage(source: unknown, ...args: number[]): void;
   createPattern?(source: unknown, repetition: string): unknown;
   save(): void;
@@ -270,6 +274,74 @@ function drawTextDash(c: SceneCtx): void {
   c.lineTo(456, 264);
   c.stroke();
   void w;
+}
+
+/** 阴影场景（图层方案：遮罩 + 分离高斯 + 合成） */
+const SHADOW_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "模糊阴影", x: 8, y: 8, w: 150, h: 140 },
+  { name: "硬阴影", x: 166, y: 8, w: 150, h: 140 },
+  { name: "文字阴影", x: 324, y: 8, w: 150, h: 140 },
+  { name: "无阴影", x: 8, y: 156, w: 466, h: 106 },
+];
+
+function drawShadows(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+  c.shadowColor = "rgba(0,0,0,0.7)";
+  c.shadowBlur = 14;
+  c.shadowOffsetX = 7;
+  c.shadowOffsetY = 7;
+  c.fillStyle = "#35d7ee";
+  c.beginPath();
+  c.roundRect(30, 30, 96, 96, 14);
+  c.fill();
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 10;
+  c.shadowOffsetY = 6;
+  c.fillStyle = "#f5d02e";
+  c.beginPath();
+  c.arc(240, 78, 42, 0, Math.PI * 2);
+  c.fill();
+  c.shadowColor = "rgba(0,0,0,0.85)";
+  c.shadowBlur = 9;
+  c.shadowOffsetX = 4;
+  c.shadowOffsetY = 4;
+  c.fillStyle = "#f2f5ff";
+  c.font = "700 32px " + FONT;
+  c.fillText("Shadow", 336, 86);
+  c.shadowColor = "rgba(0,0,0,0)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+  c.fillStyle = "#b07cff";
+  c.beginPath();
+  c.roundRect(40, 180, 120, 62, 10);
+  c.fill();
+  c.fillStyle = "#3dd68c";
+  c.beginPath();
+  c.roundRect(200, 180, 120, 62, 10);
+  c.fill();
+}
+
+/** 单个硬阴影：用来判「阴影画到哪去了」——本体在左上，阴影只可能出现在两个候选位置之一 */
+const SHADOW1_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "本体", x: 10, y: 10, w: 90, h: 60 },
+  { name: "阴影(正向)", x: 210, y: 50, w: 90, h: 60 },
+  { name: "阴影(上下翻)", x: 210, y: 160, w: 90, h: 60 },
+  { name: "空白区", x: 330, y: 100, w: 140, h: 100 },
+];
+
+function drawShadow1(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+  // 本体 (20,20)-(80,60)；阴影 = 本体 + (200,40) = (220,60)-(280,100)
+  // 若采样被上下翻转，就会出现在 y = 270-100 .. 270-60 = 170..210（即「阴影(上下翻)」那格）
+  c.shadowColor = "rgba(255,64,64,1)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 200;
+  c.shadowOffsetY = 40;
+  c.fillStyle = "#00a0ff";
+  c.fillRect(20, 20, 60, 40);
 }
 
 /** 描边场景：闭合路径首尾的 join（原生 vs 本框架） */
@@ -701,6 +773,8 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
   stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },
+  shadow: { label: "阴影", draw: (c) => drawShadows(c), regions: SHADOW_REGIONS },
+  shadow1: { label: "单阴影定位", draw: (c) => drawShadow1(c), regions: SHADOW1_REGIONS },
 };
 const sceneId = params.get("scene") ?? "parity";
 const scene = SCENES[sceneId] ?? SCENES.parity!;
@@ -873,6 +947,7 @@ async function main(): Promise<void> {
     `alpha 差异像素=${alphaMismatch}`,
   ];
   stats.textContent = lines.join("\n");
+  (globalThis as Record<string, unknown>).__parityMap = mapLines;
   for (const l of mapLines) console.log(l);
 
   // 定点取样：区分「颜色错了」还是「几何/边缘错了」
@@ -898,21 +973,22 @@ async function main(): Promise<void> {
     console.log(`PARITY_PX ${name} (${x},${y}) 原生=${px(nativeData, x, y)} 框架=${px(ours, x, y)}`);
   }
 
-  console.log(
-    "PARITY_SELFTEST " +
-      JSON.stringify({
-        backend: device.kind,
-        msaa: target.sampleCount,
-        width: W,
-        height: H,
-        mean: Number(overall.mean.toFixed(3)),
-        over16: Number((overall.over16 * 100).toFixed(2)),
-        over48: Number((overall.over48 * 100).toFixed(2)),
-        bestShift: [best.dx, best.dy, Number(best.mean.toFixed(3))],
-        alphaMismatch,
-        regions: Object.fromEntries(regions.map((r) => [r.name, Number(r.mean.toFixed(2))])),
-      }),
-  );
+  const result = {
+    backend: device.kind,
+    msaa: target.sampleCount,
+    width: W,
+    height: H,
+    mean: Number(overall.mean.toFixed(3)),
+    over16: Number((overall.over16 * 100).toFixed(2)),
+    over48: Number((overall.over48 * 100).toFixed(2)),
+    bestShift: [best.dx, best.dy, Number(best.mean.toFixed(3))],
+    alphaMismatch,
+    regions: Object.fromEntries(regions.map((r) => [r.name, Number(r.mean.toFixed(2))])),
+  };
+  // 控制台里也打一份，但探针经常在 Runtime.enable 之前就错过这行日志（页面加载比
+  // CDP 连上还快），所以**以此处的全局变量为准**。
+  (globalThis as Record<string, unknown>).__parity = result;
+  console.log("PARITY_SELFTEST " + JSON.stringify(result));
 }
 
 const status = { err: "" };
