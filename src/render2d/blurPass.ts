@@ -23,9 +23,26 @@ export class BlurPass extends FullScreenPass {
     super(device, { name: "2d-shadow-blur", fragment: { glsl: BLUR_GLSL, wgsl: BLUR_WGSL }, targetFormat });
   }
 
-  /** 沿 (dx, dy)（单位方向）模糊；`radius` 为像素步长 */
-  drawDirection(pass: RenderPassEncoder, input: Texture, width: number, height: number, dx: number, dy: number, radius: number): void {
-    this.setParams(dx, dy, radius, 0);
+  /**
+   * 沿 (dx, dy)（单位方向）模糊；`radius` 为像素步长。
+   *
+   * `tint` 给了就把结果直接变成**按阴影色着色、直通 alpha** 的图像
+   * （`rgb = 阴影色`、`a = 覆盖率 × 阴影色 alpha`）：这样后面那次「合成」只要一次
+   * **参数恒定**的直通拷贝 —— 同一个 pass 被多个阴影组复用时不会串参数
+   * （UniformBlock 是**记录时写、回放时才读**的，参数不同的多次 draw 只会留下最后一次）。
+   * `radius = 0` 时它退化成一次纯着色（9 个权重之和恰好是 1）。
+   */
+  drawDirection(
+    pass: RenderPassEncoder,
+    input: Texture,
+    width: number,
+    height: number,
+    dx: number,
+    dy: number,
+    radius: number,
+    tint?: { r: number; g: number; b: number; a: number },
+  ): void {
+    this.setParams(dx, dy, radius, tint ? 1 : 0, tint?.r ?? 0, tint?.g ?? 0, tint?.b ?? 0, tint?.a ?? 0);
     this.draw(pass, input, width, height);
   }
 }
@@ -74,7 +91,7 @@ void main() {
   sum += (texture(u_input, v_uv + step * 2.0) + texture(u_input, v_uv - step * 2.0)) * w2;
   sum += (texture(u_input, v_uv + step * 3.0) + texture(u_input, v_uv - step * 3.0)) * w3;
   sum += (texture(u_input, v_uv + step * 4.0) + texture(u_input, v_uv - step * 4.0)) * w4;
-  fragColor = sum;
+  fragColor = u_params.w > 0.5 ? vec4(u_params2.rgb, sum.a * u_params2.a) : sum;
 }
 `;
 
@@ -88,6 +105,7 @@ fn fs_main(in : FSIn) -> @location(0) vec4f {
   sum = sum + (textureSample(u_input, u_inputSampler, in.v_uv + step * 2.0) + textureSample(u_input, u_inputSampler, in.v_uv - step * 2.0)) * 0.1216216216;
   sum = sum + (textureSample(u_input, u_inputSampler, in.v_uv + step * 3.0) + textureSample(u_input, u_inputSampler, in.v_uv - step * 3.0)) * 0.0540540541;
   sum = sum + (textureSample(u_input, u_inputSampler, in.v_uv + step * 4.0) + textureSample(u_input, u_inputSampler, in.v_uv - step * 4.0)) * 0.0162162162;
+  if (fx.u_params.w > 0.5) { return vec4f(fx.u_params2.rgb, sum.a * fx.u_params2.a); }
   return sum;
 }
 `;

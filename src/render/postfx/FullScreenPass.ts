@@ -62,6 +62,12 @@ export interface PostEffect {
   dispose?(): void;
 }
 
+/** 直通 alpha 的 source-over（render2d 的阴影/图层合成都用它） */
+export const STRAIGHT_OVER = {
+  color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+  alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
+};
+
 const OVER_BLEND = {
   color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },
   alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const, operation: "add" as const },

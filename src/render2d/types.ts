@@ -74,6 +74,15 @@ export interface SavedState {
   shadowColor: string;
   /** 阴影模糊半径（0 = 硬边阴影） */
   shadowBlur: number;
+  /**
+   * 阴影**扩散**（逻辑像素，默认 0）：把阴影轮廓向外扩张这么多，再按 `shadowBlur` 模糊。
+   *
+   * 原生 Canvas2D 没有这个属性（CSS `box-shadow` 有 spread）；这里是框架扩展。
+   * 实现是**几何扩张**（沿轮廓法线外扩 + 顶点画圆盘；描边则直接加宽线宽），所以
+   * `shadowBlur = 0` 时不会多产生任何 pass —— 比"用大模糊凑出扩散感"便宜得多，
+   * 缩放比例大 / 半径大时尤其明显。
+   */
+  shadowSpread: number;
   shadowOffsetX: number;
   shadowOffsetY: number;
   clip: DeviceRect | null;

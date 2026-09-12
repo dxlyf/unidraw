@@ -18,7 +18,9 @@ import { fillTriangles, type FillRule } from "./fill.js";
 import type { Contour } from "./pathTypes.js";
 import { blendForComposite } from "./composite.js";
 import { RenderTarget } from "../render/RenderTarget.js";
-import { BlurPass, ShadowCompositePass } from "./blurPass.js";
+import { BlurPass } from "./blurPass.js";
+import { CopyPass } from "../render/postfx/CopyPass.js";
+import { STRAIGHT_OVER } from "../render/postfx/FullScreenPass.js";
 import { BlendModePass, LayerPass, PREMULTIPLIED_OVER, dstTextureBlendIndex } from "./blendPass.js";
 import { logger } from "../util/logger.js";
 import { sourceSize, textureFromImageSource, type CanvasImageSourceLike } from "../render/texture/image.js";
@@ -107,8 +109,9 @@ export class Canvas2D {
   private readonly imageTextures = new WeakMap<object, Texture>();
   /** 阴影遮罩（只存覆盖率）与模糊中转目标 */
   private shadowTmp: RenderTarget | null = null;
+
   private shadowBlurPass: BlurPass | null = null;
-  private shadowCompositePass: ShadowCompositePass | null = null;
+  private shadowCompositePass: CopyPass | null = null;
   /** 合成管线的「格式|采样数|翻转」键：调用方 pass 变了就得重建 */
   private shadowCompositeKey = "";
   /**
@@ -119,7 +122,7 @@ export class Canvas2D {
    */
   private readonly shadowGroups = new Map<
     string,
-    { r: number; g: number; b: number; a: number; blur: number; offsetX: number; offsetY: number }
+    { r: number; g: number; b: number; a: number; blur: number; offsetX: number; offsetY: number; spread: number }
   >();
   /**
    * 每一组阴影的图层纹理（键与 `shadowGroups` 一致）。
@@ -131,7 +134,7 @@ export class Canvas2D {
    * 每帧的参数组键都不一样，于是每帧都会新建一整套全屏目标（MSAA 遮罩 + 结果），
    * 几秒钟就能把显存吃光 → 卡死。所以按 LRU 缓存，见 `pruneShadowLayers()`。
    */
-  private readonly shadowLayers = new Map<string, { mask: RenderTarget; dst: RenderTarget | null; texture: Texture }>();
+  private readonly shadowLayers = new Map<string, { mask: RenderTarget; dst: RenderTarget | null; tinted: RenderTarget | null; texture: Texture }>();
   /** 本帧用到过的阴影组（这些不能在本帧淘汰：合成要等到回放时才读它们的纹理） */
   private readonly shadowLayersUsed = new Set<string>();
   /** 图层模式：本帧内容先画在这两张上 ping-pong（只在出现「目标当纹理」的混合模式时才建） */
@@ -177,6 +180,7 @@ export class Canvas2D {
     shadowBlur: 0,
     shadowOffsetX: 0,
     shadowOffsetY: 0,
+    shadowSpread: 0,
     clip: null,
   };
 
@@ -528,6 +532,13 @@ export class Canvas2D {
   set shadowOffsetY(v: number) {
     this.state.shadowOffsetY = Number.isFinite(v) ? v : 0;
   }
+  /** 阴影扩散（逻辑像素，0 = 不扩散）；框架扩展，原生 Canvas2D 没有 */
+  get shadowSpread(): number {
+    return this.state.shadowSpread;
+  }
+  set shadowSpread(v: number) {
+    this.state.shadowSpread = v > 0 && Number.isFinite(v) ? v : 0;
+  }
   /**
    * 合成模式（与原生同名）。
    *
@@ -576,6 +587,7 @@ export class Canvas2D {
       shadowBlur: this.state.shadowBlur,
       shadowOffsetX: this.state.shadowOffsetX,
       shadowOffsetY: this.state.shadowOffsetY,
+      shadowSpread: this.state.shadowSpread,
       lineDashOffset: this.state.lineDashOffset,
       clip: this.state.clip ? { ...this.state.clip } : null,
     });
@@ -1321,16 +1333,56 @@ export class Canvas2D {
    * 键同时充当 op 上的 `shadow` 标记：键相同 = 参数逐位相同 = 可以共用一张遮罩。
    */
   private shadowGroupKey(): string {
-    const key = `${this.state.shadowColor}|${this.state.shadowBlur}|${this.state.shadowOffsetX}|${this.state.shadowOffsetY}`;
+    const key = `${this.state.shadowColor}|${this.state.shadowBlur}|${this.state.shadowOffsetX}|${this.state.shadowOffsetY}|${this.state.shadowSpread}`;
     if (!this.shadowGroups.has(key)) {
       this.shadowGroups.set(key, {
         ...this.shadowColorRgba(),
         blur: this.state.shadowBlur,
         offsetX: this.state.shadowOffsetX,
         offsetY: this.state.shadowOffsetY,
+        spread: this.state.shadowSpread,
       });
     }
     return key;
+  }
+
+  /**
+   * 几何扩张：把一批轮廓向外扩 `radius`（用户单位）。
+   *
+   * 做法是多边形 ⊕ 圆盘的直接构造 —— 每条边外扩成一个四边形、每个顶点放一个圆盘，
+   * 两者的并集就是扩张结果（凸/凹都成立；顶点密到一定程度后圆盘近似为圆）。
+   * 只在**阴影遮罩**里用：比"用更大的模糊半径去凑扩散"便宜得多，
+   * `shadowBlur = 0` 时更是零额外 pass。
+   */
+  private emitDilation(polys: readonly Pt2[][], radius: number): void {
+    const SEG = 12; // 每个圆盘的分段（顶点很密，够用）
+    const disc = (cx: number, cy: number) => {
+      const center = this.pushFlat(cx, cy);
+      let prev = -1;
+      for (let i = 0; i <= SEG; i++) {
+        const a = (i / SEG) * Math.PI * 2;
+        const v = this.pushFlat(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius);
+        if (prev >= 0) this.pushTri("flat", center, prev, v);
+        prev = v;
+      }
+    };
+    for (const poly of polys) {
+      const n = poly.length;
+      if (n < 3) continue;
+      for (let i = 0; i < n; i++) {
+        const p = poly[i]!;
+        const q = poly[(i + 1) % n]!;
+        const off = normalOffset(p[0], p[1], q[0], q[1], radius);
+        // 沿法线外扩的四边形（两侧各一条，保证并集覆盖整圈）
+        const a = this.pushFlat(p[0] + off.x, p[1] + off.y);
+        const b = this.pushFlat(q[0] + off.x, q[1] + off.y);
+        const c = this.pushFlat(q[0] - off.x, q[1] - off.y);
+        const d = this.pushFlat(p[0] - off.x, p[1] - off.y);
+        this.pushTri("flat", a, b, c);
+        this.pushTri("flat", a, c, d);
+        disc(p[0], p[1]);
+      }
+    }
   }
 
   /** 把一批三角形按阴影位移画一次（白色 + 覆盖率），并单独记一个 shadow op */
@@ -1348,6 +1400,9 @@ export class Canvas2D {
       const ids: number[] = [this.pushFlat(tri[0]![0], tri[0]![1]), this.pushFlat(tri[1]![0], tri[1]![1]), this.pushFlat(tri[2]![0], tri[2]![1])];
       this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
     }
+    // 扩散：**几何**向外扩张（轮廓各边外扩成四边形 + 每个顶点画圆盘，并集即
+    // 「多边形 ⊕ 半径 spread 的圆」），完全不额外增加 pass，也不靠模糊去凑。
+    if (this.state.shadowSpread > 0 && polys) this.emitDilation(polys, this.state.shadowSpread);
     this.state.ctm = base;
     this.ops.push({
       kind: "flat",
@@ -1383,14 +1438,15 @@ export class Canvas2D {
   }
 
   /** 只画某一组阴影 op 的迷你绘制循环（遮罩目标：source-over、纯白/字形遮罩） */
-  private drawShadowOps(pass: RenderPassEncoder, groupKey: string, sampleCount: number): void {
+  private drawShadowOps(pass: RenderPassEncoder, groupKey: string, sampleCount: number, scale = 1): void {
     let lastKind: "flat" | "text" | null = null;
     let lastTex: Texture | null = null;
     for (const op of this.ops) {
       if (op.shadow !== groupKey) continue;
+      // 裁剪矩形是全尺寸设备像素，遮罩缩小后要一起缩（scissor 永远是附件的物理像素）
       const c = op.clip;
-      if (c) pass.setScissorRect(c.x, c.y, c.w, c.h);
-      else pass.setScissorRect(0, 0, this.viewW, this.viewH);
+      if (c) pass.setScissorRect(Math.round(c.x / scale), Math.round(c.y / scale), Math.max(1, Math.round(c.w / scale)), Math.max(1, Math.round(c.h / scale)));
+      else pass.setScissorRect(0, 0, Math.max(1, Math.floor(this.viewW / scale)), Math.max(1, Math.floor(this.viewH / scale)));
       if (lastKind !== op.kind) {
         lastKind = op.kind;
         if (op.kind === "flat") {
@@ -1428,6 +1484,15 @@ export class Canvas2D {
     // 最终边缘，1x 采样会留下明显锯齿（原生那条边是抗锯齿的）。MSAA 目标的
     // `texture` 是解析后的普通可采样纹理，所以后面照常采样。
     const samples = Math.max(1, Math.floor(sampleCount));
+    /**
+     * 大半径时遮罩按 1/scale 栅格化（等价「把轮廓缩小再模糊」，见下方模糊那段）：
+     * scale 由阴影的**步长**（= blur/4，本来就是个"以像素计"的量）决定 ——
+     * 步长 < 4 像素时 9-tap 采样已经很密，不需要降采样；≥ 12 像素时降到 1/4。
+     */
+    const stepPx = group.blur / 4;
+    const scale = stepPx >= 12 ? 4 : stepPx >= 4 ? 2 : 1;
+    const mw = Math.max(1, Math.floor(w / scale));
+    const mh = Math.max(1, Math.floor(h / scale));
 
     // 关键：**每组各留一份遮罩/结果纹理**。
     // 本函数里的 submit 是立刻执行的，而「合成」只是记进调用方的 pass，要等调用方
@@ -1447,14 +1512,15 @@ export class Canvas2D {
     }
     if (!layer) {
       layer = {
-        mask: new RenderTarget(this.device, { label: "2d-shadow-mask", width: w, height: h, format, depth: false, sampleCount: samples }),
+        mask: new RenderTarget(this.device, { label: "2d-shadow-mask", width: mw, height: mh, format, depth: false, sampleCount: samples }),
         dst: null,
+        tinted: null,
         texture: null as unknown as Texture,
       };
       this.shadowLayers.set(groupKey, layer);
     }
     this.shadowLayersUsed.add(groupKey);
-    layer.mask.resize(w, h);
+    layer.mask.resize(mw, mh);
     const mask = layer.mask;
 
     const enc = this.device.createCommandEncoder("2d-shadow-mask");
@@ -1463,40 +1529,90 @@ export class Canvas2D {
       colorAttachments: [mask.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
       depthStencilAttachment: null,
     });
-    this.drawShadowOps(p, groupKey, samples);
+    // 投影不变（世界坐标 [0..w]×[0..h]），视口小了 → 等于把轮廓缩小栅格化
+    this.drawShadowOps(p, groupKey, samples, scale);
     p.end();
     this.device.submit([enc.finish()]);
 
-    // blur = 0 时遮罩本身就是要的硬阴影，跳过模糊（同时也避开 radius→0 的数值问题）
-    layer.texture = mask.texture;
-    if (!(group.blur > 0)) return;
+    // blur = 0 时遮罩本身就是要的硬阴影，跳过模糊（同时也避开 radius→0 的数值问题）：
+    // 只做一次「着色」把它变成直通 alpha 的阴影色图像。
+    if (!(group.blur > 0)) {
+      layer.texture = this.tintShadowLayer(layer, mask.texture, w, h, group);
+      return;
+    }
     // 模糊的每一趟都写**单采样**目标：遮罩是 MSAA 时不能当附件（模糊管线是 1x，
     // 采样数对不上 WebGPU 直接校验失败 → 整条命令缓冲作废）。中转目标 `tmp` 只在
     // 本函数内部用（合成不采样它），所以可以全局共用；结果 `dst` 要被合成采样，
     // 必须每组一份（同上面的理由）。
-    const tmp = this.ensureShadowTmp(w, h, format);
-    if (layer.dst) layer.dst.resize(w, h);
-    else layer.dst = new RenderTarget(this.device, { label: "2d-shadow-dst", width: w, height: h, format, depth: false, sampleCount: 1 });
-    const dst = layer.dst;
     if (!this.shadowBlurPass) this.shadowBlurPass = new BlurPass(this.device, format);
     // 9-tap 核自身 σ_k ≈ 2 个步长；原生 σ ≈ blur/2 → 步长 = blur/4
     const radius = Math.max(0.5, group.blur / 4);
-    const steps: [Texture, RenderTarget, number, number][] = [
-      [mask.texture, tmp, 1, 0],
-      [tmp.texture, dst, 0, 1],
-    ];
-    for (const [src, target, dx, dy] of steps) {
-      const e2 = this.device.createCommandEncoder("2d-shadow-blur");
-      const p2 = e2.beginRenderPass({
-        label: "2d-shadow-blur",
-        colorAttachments: [target.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
-        depthStencilAttachment: null,
-      });
-      this.shadowBlurPass.drawDirection(p2, src, w, h, dx, dy, radius);
-      p2.end();
-      this.device.submit([e2.finish()]);
+    // **降采样**：9-tap 核只有 ±4 个 tap，步长一旦远大于 1 像素就是欠采样（大半径下
+    // 会看出条带）。遮罩本身就按 1/scale 栅格化（相当于「把轮廓缩小再模糊」），
+    // 再按缩小的步长模糊、最后由合成那张线性采样放大回来 —— 同一半径下每个目标像素
+    // 覆盖的 tap 更密（条带明显减少），遮罩 + 两次模糊的计算量都降到 1/scale²。
+    const bw = mw;
+    const bh = mh;
+    const tmp = this.ensureShadowTmp(bw, bh, format);
+    if (layer.dst) layer.dst.resize(bw, bh);
+    else layer.dst = new RenderTarget(this.device, { label: "2d-shadow-dst", width: bw, height: bh, format, depth: false, sampleCount: 1 });
+    const dst = layer.dst;
+    const iterations = 1;
+    const step = radius / scale;
+    let blurSrc: Texture = mask.texture;
+    for (let it = 0; it < iterations; it++) {
+      const steps: [Texture, RenderTarget, number, number][] = [
+        [blurSrc, tmp, 1, 0],
+        [tmp.texture, dst, 0, 1],
+      ];
+      for (const [source, target, dx, dy] of steps) {
+        const e2 = this.device.createCommandEncoder("2d-shadow-blur");
+        const p2 = e2.beginRenderPass({
+          label: "2d-shadow-blur",
+          colorAttachments: [target.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
+          depthStencilAttachment: null,
+        });
+        this.shadowBlurPass.drawDirection(p2, source, bw, bh, dx, dy, step);
+        p2.end();
+        this.device.submit([e2.finish()]);
+      }
+      blurSrc = dst.texture;
     }
-    layer.texture = dst.texture;
+    layer.texture = this.tintShadowLayer(layer, dst.texture, bw, bh, group);
+  }
+
+  /**
+   * 把覆盖率图**立刻**着色成「阴影色 + 直通 alpha」的图像（自身一次 submit）。
+   *
+   * 为什么必须在这里着色、而不是留到合成那一步：`FullScreenPass` 的 uniform 是
+   * **记录时写、回放时才读**的 —— 同一个 pass 实例被多个阴影组复用时，所有 draw 只
+   * 会看到最后一次写入的参数，多组阴影就会全部套上最后一组的颜色（影子串色）。
+   * 这里每次 submit 都当场执行，参数用完即弃；留给调用方 pass 的那一步只剩一次
+   * **参数恒定**的直通拷贝。
+   */
+  private tintShadowLayer(
+    layer: { tinted: RenderTarget | null },
+    source: Texture,
+    w: number,
+    h: number,
+    group: { r: number; g: number; b: number; a: number },
+  ): Texture {
+    const format = (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as TextureFormat;
+    if (!this.shadowBlurPass) this.shadowBlurPass = new BlurPass(this.device, format);
+    if (layer.tinted) layer.tinted.resize(w, h);
+    else layer.tinted = new RenderTarget(this.device, { label: "2d-shadow-tinted", width: w, height: h, format, depth: false, sampleCount: 1 });
+    const target = layer.tinted;
+    const enc = this.device.createCommandEncoder("2d-shadow-tint");
+    const p = enc.beginRenderPass({
+      label: "2d-shadow-tint",
+      colorAttachments: [target.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
+      depthStencilAttachment: null,
+    });
+    // radius = 0 → 9 个权重之和为 1：原样取覆盖率，只做着色
+    this.shadowBlurPass.drawDirection(p, source, w, h, 1, 0, 0, group);
+    p.end();
+    this.device.submit([enc.finish()]);
+    return target.texture;
   }
 
   /** 惰性创建/复用阴影模糊的横向中转目标（1x 单采样，全局共用） */
@@ -1505,6 +1621,7 @@ export class Canvas2D {
     else this.shadowTmp = new RenderTarget(this.device, { label: "2d-shadow-tmp", width: w, height: h, format, depth: false, sampleCount: 1 });
     return this.shadowTmp;
   }
+
 
   /**
    * 淘汰没被本帧用到的阴影图层目标（LRU，上限 `SHADOW_LAYER_CACHE`）。
@@ -1520,29 +1637,35 @@ export class Canvas2D {
       if (this.shadowLayersUsed.has(key)) continue;
       layer.mask.dispose();
       layer.dst?.dispose();
+      layer.tinted?.dispose();
       this.shadowLayers.delete(key);
     }
   }
 
-  /** 把某一组模糊后的遮罩按该组阴影色合成到调用方的 pass（source-over，直通 alpha） */
+  /**
+   * 把某一组**已经着色好**的阴影图合成到调用方的 pass（source-over，直通 alpha）。
+   *
+   * 这里只做一次「参数恒定」的直通拷贝：参数只有一个 flip 标志，对所有组、所有帧都一样，
+   * 所以同一个 pass 实例被复用时不会串（着色已经在 `tintShadowLayer` 里当场做完了）。
+   */
   private compositeShadow(pass: RenderPassEncoder, groupKey: string): void {
-    const group = this.shadowGroups.get(groupKey);
     const layer = this.shadowLayers.get(groupKey);
     const tex = layer?.texture ?? null;
-    if (!tex || !group) return;
+    if (!tex) return;
     const w = Math.max(1, this.viewW);
     const h = Math.max(1, this.viewH);
     const format = (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as TextureFormat;
-    // 管线必须和调用方 pass 的附件状态一致：格式 + 采样数（MSAA 时是 4，不是 1）
-    const flipY = this.device.kind === "webgpu";
-    const key = `${format}|${pass.sampleCount}|${flipY ? 1 : 0}`;
+    // 管线必须和调用方 pass 的附件状态一致：格式 + 采样数（MSAA 时是 4，不是 1）。
+    // 翻转：着色已经多了一趟内部采样（见 tintShadowLayer），内部链的翻转奇偶性因此变化 ——
+    // 现在 WebGL2 与 WebGPU 的取向一致，合成这步不再需要翻转。
+    const key = `${format}|${pass.sampleCount}|flip0`;
     if (this.shadowCompositeKey !== key || !this.shadowCompositePass) {
       this.shadowCompositePass?.dispose();
-      this.shadowCompositePass = new ShadowCompositePass(this.device, format, { sampleCount: pass.sampleCount, flipY });
+      this.shadowCompositePass = new CopyPass(this.device, format, { sampleCount: pass.sampleCount, blend: STRAIGHT_OVER });
       this.shadowCompositeKey = key;
     }
     pass.setScissorRect(0, 0, w, h);
-    this.shadowCompositePass.drawTint(pass, tex, w, h, group.r, group.g, group.b, group.a);
+    this.shadowCompositePass.draw(pass, tex, w, h);
   }
   fill(rule: FillRule = "nonzero"): void {
     const contours = this.path.flatten(0.2);
@@ -1663,7 +1786,7 @@ export class Canvas2D {
     }
     const contours = this.applyLineDash(raw);
     if (contours.length === 0) return;
-    const hw = this.state.lineWidth / 2;
+    let hw = this.state.lineWidth / 2;
     const strokePolys: Pt2[][] = [];
     for (const c of contours) if (c.points.length >= 3) strokePolys.push(c.points);
 
@@ -1747,7 +1870,11 @@ export class Canvas2D {
       }
     };
 
+    // 阴影的扩散在描边上就是「带子变宽」：半宽 + shadowSpread（带 ⊕ 圆盘 = 更宽的带）
+    const bodyHw = hw;
+    if (this.shadowEnabled() && this.state.shadowSpread > 0) hw = bodyHw + this.state.shadowSpread;
     this.emitShadowGeometry(emitStrokeGeometry, strokePolys);
+    hw = bodyHw;
 
     this.paint = this.resolvePaint(this.state.strokeStyle);
     const bodyStart = this.flatI.length;

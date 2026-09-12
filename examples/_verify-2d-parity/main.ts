@@ -83,6 +83,8 @@ interface SceneCtx {
   /** 用当前路径做裁剪（原生侧走这个） */
   clip?(): void;
   clearRect(x: number, y: number, w: number, h: number): void;
+  /** 框架扩展：阴影扩散（原生没有这个属性，场景里用 `in` 判断后走小抄） */
+  shadowSpread?: number;
 }
 
 interface GradientFactory {
@@ -569,6 +571,88 @@ function drawColorShadows(c: SceneCtx): void {
   c.shadowBlur = 0;
   c.shadowOffsetX = 0;
   c.shadowOffsetY = 0;
+}
+
+/** 大半径模糊（降采样路径）+ 几何 spread（原生用「外扩轮廓」小抄对齐） */
+const SHADOWBIG_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "模糊40", x: 8, y: 8, w: 150, h: 124 },
+  { name: "模糊100", x: 160, y: 8, w: 160, h: 124 },
+  { name: "spread圆角矩形", x: 322, y: 8, w: 150, h: 124 },
+  { name: "spread圆", x: 8, y: 136, w: 464, h: 126 },
+];
+
+function clearShadow(c: SceneCtx): void {
+  c.shadowColor = "rgba(0,0,0,0)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+  if ("shadowSpread" in c) c.shadowSpread = 0;
+}
+
+function drawShadowBig(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+  // 原生没有 shadowSpread：手动画一块**外扩的实心形状**当阴影（「几何 spread」的等价物），
+  // 再画本体；框架侧一条语句就够（spread 只作用于阴影）。两边视觉应完全一致。
+  const hasSpread = "shadowSpread" in c;
+  const drawSpread = (
+    color: string,
+    body: string,
+    ox: number,
+    oy: number,
+    build: (grow: number, dx: number, dy: number) => void,
+    s: number,
+  ): void => {
+    if (hasSpread) {
+      c.shadowColor = color;
+      c.shadowBlur = 0;
+      c.shadowOffsetX = ox;
+      c.shadowOffsetY = oy;
+      c.shadowSpread = s;
+      c.fillStyle = body;
+      c.beginPath();
+      build(0, 0, 0);
+      c.fill();
+      clearShadow(c);
+    } else {
+      c.fillStyle = color;
+      c.beginPath();
+      build(s, ox, oy);
+      c.fill();
+      c.fillStyle = body;
+      c.beginPath();
+      build(0, 0, 0);
+      c.fill();
+    }
+  };
+
+  // 1) 大半径模糊（步长 10 → 走 1/2 降采样遮罩）
+  c.shadowColor = "rgba(0,0,0,0.75)";
+  c.shadowBlur = 40;
+  c.shadowOffsetX = 10;
+  c.shadowOffsetY = 8;
+  c.fillStyle = "#35d7ee";
+  c.beginPath();
+  c.roundRect(48, 44, 76, 52, 10);
+  c.fill();
+  clearShadow(c);
+
+  // 2) 更大半径（步长 25 → 1/4 降采样遮罩；9-tap 欠采样最明显）
+  c.shadowColor = "rgba(255, 92, 122, 0.8)";
+  c.shadowBlur = 100;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 16;
+  c.fillStyle = "#3dd68c";
+  c.beginPath();
+  c.roundRect(200, 48, 80, 48, 8);
+  c.fill();
+  clearShadow(c);
+
+  // 3) spread：圆角矩形（外扩 12；原生侧画外扩 12、圆角半径 +12 的实心矩形）
+  drawSpread("rgba(0,0,0,0.8)", "#f5d02e", 6, 6, (grow, dx, dy) => c.roundRect(350 - grow + dx, 44 - grow + dy, 72 + 2 * grow, 50 + 2 * grow, 8 + grow), 12);
+
+  // 4) spread：圆（外扩 = 半径 +12）
+  drawSpread("rgba(53, 215, 238, 0.8)", "#b07cff", 14, 6, (grow, dx, dy) => c.arc(90 + dx, 196 + dy, 34 + grow, 0, Math.PI * 2), 12);
 }
 
 /** 描边场景：闭合路径首尾的 join（原生 vs 本框架） */
@@ -1069,6 +1153,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   shadowblend: { label: "阴影+图层混合", draw: (c) => drawShadowBlend(c), regions: SHADOWBLEND_REGIONS },
   clear: { label: "clearRect", draw: (c) => drawClearRect(c), regions: CLEAR_REGIONS },
   colorshadow: { label: "颜色解析+描边阴影", draw: (c) => drawColorShadows(c), regions: COLOR2_REGIONS },
+  shadowbig: { label: "大半径模糊+spread", draw: (c) => drawShadowBig(c), regions: SHADOWBIG_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
   stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },
