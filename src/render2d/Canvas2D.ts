@@ -1491,6 +1491,9 @@ export class Canvas2D {
      */
     const stepPx = group.blur / 4;
     const scale = stepPx >= 12 ? 4 : stepPx >= 4 ? 2 : 1;
+    // 遮罩的采样数：要模糊时用 1x —— 反正要被抹平，MSAA 只是白花一趟全屏带宽 + 一次 resolve；
+    // 硬阴影（blur = 0）保留 MSAA，边缘才有抗锯齿。
+    const maskSamples = group.blur > 0 ? 1 : samples;
     const mw = Math.max(1, Math.floor(w / scale));
     const mh = Math.max(1, Math.floor(h / scale));
 
@@ -1505,14 +1508,14 @@ export class Canvas2D {
       this.shadowLayers.delete(groupKey);
       this.shadowLayers.set(groupKey, layer);
     }
-    if (layer && layer.mask.sampleCount !== samples) {
+    if (layer && layer.mask.sampleCount !== maskSamples) {
       layer.mask.dispose();
       layer = null;
       this.shadowLayers.delete(groupKey);
     }
     if (!layer) {
       layer = {
-        mask: new RenderTarget(this.device, { label: "2d-shadow-mask", width: mw, height: mh, format, depth: false, sampleCount: samples }),
+        mask: new RenderTarget(this.device, { label: "2d-shadow-mask", width: mw, height: mh, format, depth: false, sampleCount: maskSamples }),
         dst: null,
         tinted: null,
         texture: null as unknown as Texture,
@@ -1530,7 +1533,7 @@ export class Canvas2D {
       depthStencilAttachment: null,
     });
     // 投影不变（世界坐标 [0..w]×[0..h]），视口小了 → 等于把轮廓缩小栅格化
-    this.drawShadowOps(p, groupKey, samples, scale);
+    this.drawShadowOps(p, groupKey, maskSamples, scale);
     p.end();
     this.device.submit([enc.finish()]);
 
@@ -1578,6 +1581,8 @@ export class Canvas2D {
       }
       blurSrc = dst.texture;
     }
+    // 着色单独一趟：**必须**与硬阴影那条路径保持同样的「内部采样趟数奇偶性」，
+    // 否则合成那步的翻转（WebGPU 需要、WebGL2 不需要）没法用同一个常量覆盖两个后端。
     layer.texture = this.tintShadowLayer(layer, dst.texture, bw, bh, group);
   }
 

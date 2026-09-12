@@ -53,8 +53,14 @@ bootDemo(
         grid: true,
         /** 文字/圆角矩形的阴影（shadowBlur 图层） */
         shadow: true,
-        /** 覆盖矩形用 overlay（需要「目标当纹理」的图层模式） */
-        blend: true,
+        /**
+         * 覆盖矩形用 overlay（需要「目标当纹理」的图层模式）。
+         *
+         * **默认关**：图层模式一帧要多 4~5 趟全屏 MSAA pass（把整帧搬进图层 → 源图层 →
+         * 混合 → 呈现），1894×924 下实测 83fps → 15fps，与图形数量无关。
+         * 想对着看效果就加 `?blend=1`。
+         */
+        blend: false,
         /** 虚线描边 */
         dash: true,
       };
