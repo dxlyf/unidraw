@@ -10,7 +10,7 @@
 //   $env:PARITY_MAP="1"                          # 额外打印差异热力图
 import { execFileSync } from "node:child_process";
 
-const ALL = ["parity", "fillrules", "extras", "composite", "image", "pattern", "stroke", "shadow", "shadow1"];
+const ALL = ["parity", "fillrules", "extras", "composite", "blend", "image", "pattern", "stroke", "shadow", "shadow1"];
 const scenes = process.argv[2] ? process.argv[2].split(",") : ALL;
 const backends = (process.env.PARITY_BACKENDS ?? "webgl2,webgpu").split(",");
 const BASE = process.env.PARITY_URL ?? "http://127.0.0.1:8095/_verify-2d-parity/index.html";
