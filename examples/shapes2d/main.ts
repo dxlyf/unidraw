@@ -229,9 +229,18 @@ bootDemo(
             const y0 = h * 0.52;
             const box = s * 0.3;
             label("文本（字形栅格化 + 纹理）", x0, y0);
+            // 文字阴影：shadowBlur 走「遮罩 + 分离高斯 + 合成」的图层路径
+            c2d.shadowColor = "rgba(0, 0, 0, 0.65)";
+            c2d.shadowBlur = s * 0.03;
+            c2d.shadowOffsetX = s * 0.008;
+            c2d.shadowOffsetY = s * 0.008;
             c2d.fillStyle = C.white;
             c2d.font = `700 ${Math.round(box * 0.16)}px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif`;
             c2d.fillText("Hello UniDraw 你好 2D", x0, y0 + box * 0.18);
+            c2d.shadowColor = "rgba(0, 0, 0, 0)";
+            c2d.shadowBlur = 0;
+            c2d.shadowOffsetX = 0;
+            c2d.shadowOffsetY = 0;
 
             c2d.fillStyle = C.cyan;
             c2d.font = `500 ${Math.round(box * 0.09)}px system-ui, monospace`;
@@ -241,9 +250,10 @@ bootDemo(
             c2d.fillStyle = gradT;
             c2d.font = `600 ${Math.round(box * 0.1)}px system-ui`;
             c2d.fillText("WebGL2 / WebGPU 同一套代码", x0, y0 + box * 0.36);
-            c2d.fillStyle = C.dim;
+            c2d.fillStyle = "#2a3550";
             c2d.font = `400 ${Math.round(box * 0.05)}px system-ui`;
-            c2d.fillText("矩形 · 圆角矩形 · 线段 · 圆/圆弧 · 椭圆 · 贝塞尔 · 多边形 · 渐变 · 变换 · 文本 · 裁剪", x0, y0 + box * 0.47);
+            c2d.fillText("矩形 · 圆角 · 圆弧 · 椭圆 · 贝塞尔 · 多边形 · 渐变 · 变换 · 文本", x0, y0 + box * 0.44);
+            c2d.fillText("裁剪 · 虚线 · 阴影 · 25 种混合模式（含 overlay / hue / luminosity…）", x0, y0 + box * 0.5);
           }
 
           // ============ 五、裁剪 + 图层（右下） ============
@@ -276,11 +286,36 @@ bootDemo(
             c2d.arc(x0 + box * 0.5, y0 + box * 0.83, box * 0.07 + Math.sin(t * 2) * box * 0.015, 0, Math.PI * 2);
             fillPath();
             c2d.globalAlpha = 1;
-            // 层级：后画的半透明矩形盖在上面
+            // 层级：后画的半透明矩形用**图层混合模式**盖在上面
+            // （overlay 需要把目标读成纹理，框架会自动切到图层模式）
+            c2d.globalCompositeOperation = "overlay";
             c2d.fillStyle = C.cyan;
-            c2d.globalAlpha = 0.5;
+            c2d.globalAlpha = 0.7;
             c2d.fillRect(x0 + box * 0.34, y0 + box * 0.72, box * 0.3, box * 0.2);
             c2d.globalAlpha = 1;
+            c2d.globalCompositeOperation = "source-over";
+
+            // 虚线 + 阴影的圆角矩形
+            c2d.shadowColor = "rgba(0, 0, 0, 0.7)";
+            c2d.shadowBlur = s * 0.02;
+            c2d.shadowOffsetX = s * 0.01;
+            c2d.shadowOffsetY = s * 0.008;
+            c2d.fillStyle = C.yellow;
+            c2d.beginPath();
+            c2d.roundRect(x0 - box * 0.5, y0 + box * 1.02, box * 0.9, box * 0.16, box * 0.04);
+            fillPath();
+            c2d.shadowColor = "rgba(0, 0, 0, 0)";
+            c2d.shadowBlur = 0;
+            c2d.shadowOffsetX = 0;
+            c2d.shadowOffsetY = 0;
+            c2d.setLineDash([s * 0.02, s * 0.012]);
+            c2d.strokeStyle = C.white;
+            c2d.lineWidth = Math.max(1.5, s * 0.004);
+            c2d.beginPath();
+            c2d.moveTo(x0 - box * 0.5, y0 + box * 1.28);
+            c2d.lineTo(x0 + box * 0.9, y0 + box * 1.28);
+            c2d.stroke();
+            c2d.setLineDash([]);
           }
 
           // 坐标轴/网格背景（轻）
