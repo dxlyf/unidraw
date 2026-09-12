@@ -136,6 +136,11 @@ export class Canvas2D {
 
   private viewW = 1;
   private viewH = 1;
+  /** 逻辑像素（网页坐标）→ 物理像素的倍率，等价 `devicePixelRatio`；见 `setPixelRatio` */
+  private ratioValue = 1;
+  /** 默认投影缓存（key = 逻辑尺寸），避免每帧 new 一个 Mat4 */
+  private defaultProj: Mat4 | null = null;
+  private defaultProjKey = "";
 
   // ---- 状态 ----
   private path = new Path2D();
@@ -168,6 +173,7 @@ export class Canvas2D {
       this.flatCap = Math.max(2048, options.vertexCapacity);
       this.textCap = Math.max(1024, options.vertexCapacity >> 1);
     }
+    if (options.pixelRatio) this.setPixelRatio(options.pixelRatio);
     this.textRenderer = new TextRenderer(device);
     this.initResources();
   }
@@ -651,16 +657,75 @@ export class Canvas2D {
     return this;
   }
 
+  /**
+   * 设置渲染目标的尺寸（**物理像素**：`canvas.width/height` 那种，scissor 与离屏图层
+   * 都按它算）。用户坐标用哪套由 `setPixelRatio` 决定。
+   */
   setViewportSize(width: number, height: number): this {
-    this.viewW = Math.max(1, width);
-    this.viewH = Math.max(1, height);
+    const w = Math.max(1, width);
+    const h = Math.max(1, height);
+    if (w !== this.viewW || h !== this.viewH) this.defaultProjKey = "";
+    this.viewW = w;
+    this.viewH = h;
     return this;
   }
 
-  /** 提交本帧：先按 op 顺序补裁剪，再以索引子范围 draw */
-  flush(pass: RenderPassEncoder, viewProj: Mat4): void {
+  /** 逻辑像素（网页坐标）→ 物理像素的倍率（等价 `devicePixelRatio`），默认 1 */
+  get pixelRatio(): number {
+    return this.ratioValue;
+  }
+  /**
+   * 设置「逻辑像素 → 物理像素」的倍率，默认 1。
+   *
+   * 它决定**用户坐标系**的粒度：`fillRect(10, 10, …)` 里的 10 是 10 个**逻辑像素**
+   * （网页/CSS 像素），高分屏上框架自己乘倍率画到物理像素 —— 于是同一段绘制代码在
+   * 任何 DPR 下看起来一样大，和 DOM/CSS 的坐标语义一致。
+   *
+   * `setViewportSize()` 给的始终是**物理像素**。倍率同时作用于几何与裁剪的换算，
+   * 所以 `clipRect` 也用逻辑像素写。
+   */
+  setPixelRatio(ratio: number): this {
+    const r = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+    if (r !== this.ratioValue) {
+      this.ratioValue = r;
+      this.defaultProjKey = "";
+    }
+    return this;
+  }
+
+  /**
+   * 本帧的投影矩阵：给了就用给的，否则用**网页坐标系**。
+   *
+   * 默认投影 = 原点在**左上角**、**y 向下**、范围是视口的**物理尺寸**
+   * （`setViewportSize` 给的）。用户坐标里的「逻辑像素」由 `pixelRatio` 在
+   * `devPt` 那一步就乘成物理像素了，所以这里始终是物理像素到 NDC 的映射 ——
+   * 于是 `fillRect(10, 10, 100, 50)` 会画在距左上角 (10, 10) 个**逻辑像素**处，
+   * 与画在 DOM/原生 canvas 上的直觉一致。
+   *
+   * 要把 2D 当贴片画进 3D 场景（世界空间 HUD 等）时，自己传相机/自定义矩阵。
+   */
+  private resolveViewProj(viewProj?: Mat4): Mat4 {
+    if (viewProj) return viewProj;
+    const w = Math.max(1, this.viewW);
+    const h = Math.max(1, this.viewH);
+    const key = `${w}|${h}`;
+    if (!this.defaultProj || this.defaultProjKey !== key) {
+      // ortho(0, w, h, 0) 把 y 翻过来：y = 0 在顶部（网页坐标），y 增大向下
+      this.defaultProj = Mat4.ortho(0, w, h, 0, -1, 1);
+      this.defaultProjKey = key;
+    }
+    return this.defaultProj;
+  }
+
+  /**
+   * 提交本帧。
+   *
+   * @param viewProj 2D → 裁剪空间的投影；**省略时用网页坐标系**（原点左上、y 向下、
+   *   1 单位 = 1 逻辑像素，见 `setPixelRatio`）。
+   */
+  flush(pass: RenderPassEncoder, viewProj?: Mat4): void {
     if (this.ops.length === 0) return;
-    this.viewBlock.setMat4("u_viewProj", viewProj);
+    this.viewBlock.setMat4("u_viewProj", this.resolveViewProj(viewProj));
     this.viewBlock.flush();
 
     this.ensureCapacity();
@@ -982,8 +1047,16 @@ export class Canvas2D {
   // 顶点发射
   // ======================================================================
 
+  /**
+   * 用户坐标 → 设备（物理）像素。
+   *
+   * 这里顺带把 `pixelRatio` 作为**基准缩放**乘进去（等价于 CTM 底下垫一个
+   * `scale(ratio)`）：几何、裁剪、文字、图片全都走这里，所以「逻辑像素」这套
+   * 语义在整条链路上自洽。
+   */
   private devPt(x: number, y: number): { x: number; y: number } {
-    return transformPoint(this.state.ctm, x, y, { x: 0, y: 0 });
+    const r = this.ratioValue;
+    return transformPoint(this.state.ctm, x * r, y * r, { x: 0, y: 0 });
   }
 
   // ======================================================================
@@ -1116,7 +1189,8 @@ export class Canvas2D {
     if (!polys || !blendForComposite(this.state.globalCompositeOperation)?.clearsOutside) return;
     const devPolys = polys.map((contour) =>
       contour.map(([x, y]) => {
-        const d = transformPoint(this.state.ctm, x, y, { x: 0, y: 0 });
+        // 与 `devPt` 同一套换算（含 pixelRatio）
+        const d = transformPoint(this.state.ctm, x * this.ratioValue, y * this.ratioValue, { x: 0, y: 0 });
         return [d.x, d.y] as Pt2;
       }),
     );
@@ -1729,7 +1803,24 @@ export class Canvas2D {
     if (!r) {
       throw new Error("[unidraw] clip() 目前仅支持轴对齐矩形路径；请使用 clipRect(x, y, w, h)");
     }
-    const rect: DeviceRect = { x: r[0], y: r[1], w: r[2], h: r[3] };
+    // 路径是用户坐标，scissor 要设备像素：走和 `clipRect` 同一套换算（含 pixelRatio）
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const [cx, cy] of [
+      [r[0], r[1]],
+      [r[0] + r[2], r[1]],
+      [r[0] + r[2], r[1] + r[3]],
+      [r[0], r[1] + r[3]],
+    ] as Pt2[]) {
+      const p = this.devPt(cx, cy);
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    const rect: DeviceRect = { x: Math.round(minX), y: Math.round(minY), w: Math.round(maxX - minX), h: Math.round(maxY - minY) };
     this.state.clip = this.state.clip ? intersectRects(this.state.clip, rect) : rect;
     return this;
   }
@@ -1837,7 +1928,11 @@ export class Canvas2D {
 
   private drawText(text: string, x: number, y: number, maxWidth: number | undefined, strokeWidth: number): this {
     if (!text) return this;
-    const glyph = this.textRenderer.getGlyph(text, this.state.font, strokeWidth);
+    // 字形按**设备像素**栅格化：用户→设备的倍率 = pixelRatio × CTM 缩放。不这样做的话
+    // 高分屏（或 `scale(2,2)`）上字形会先按逻辑尺寸栅格化再被放大 → 糊。
+    const ctmScale = Math.hypot(this.state.ctm.a, this.state.ctm.b) || 1;
+    const rasterScale = Math.min(8, Math.max(0.05, this.ratioValue * ctmScale));
+    const glyph = this.textRenderer.getGlyph(text, this.state.font, strokeWidth, rasterScale);
     const m = this.textRenderer.measure(text, this.state.font);
     const style = strokeWidth > 0 ? this.state.strokeStyle : this.state.fillStyle;
 

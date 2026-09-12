@@ -115,6 +115,10 @@ WebGL2 / WebGPU 共用一套实现：
 
 - 路径：`rect / roundRect / line / quadraticCurveTo / bezierCurveTo /
   arc / arcTo / ellipse / closePath`（曲线自适应细分）；
+- **坐标系 = 网页坐标系**：原点左上、y 向下、1 单位 = 1 逻辑（CSS）像素；
+  `flush(pass)` 不需要传投影矩阵（默认内置），高分屏用
+  `new Canvas2D(device, { pixelRatio: devicePixelRatio })` 即可让绘制代码与 DOM
+  坐标语义一致；要贴进 3D 场景时再自己传 `viewProj`；
 - 填充与描边：`fill()`（凸/凹多边形、耳切）/ `stroke()`（`lineCap`
   butt·round·square，`lineJoin` miter·round·bevel，`miterLimit`，`lineWidth`）；
 - 便捷图元：`fillRect` / `strokeRect` / `clearRect`（清成透明黑 —— 受变换与裁剪影响，

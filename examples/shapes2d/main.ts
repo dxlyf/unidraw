@@ -11,7 +11,6 @@
 
 import { bootDemo } from "../common/demo.js";
 import { Canvas2D, LinearGradient } from "../../src/render2d/index.js";
-import { Mat4 } from "../../src/math/mat4.js";
 import { applyUrlOverrides, createGui } from "../common/gui.js";
 
 const params = new URLSearchParams(location.search);
@@ -78,7 +77,7 @@ bootDemo(
       gui.addColor(state, "color").name("星形颜色");
       gui.add(state, "grid").name("显示网格");
       gui.add(state,'shadow').name('显示阴影')
-      
+
 
       const hud = document.querySelector<HTMLElement>(".hud");
       if (hud) {
@@ -93,7 +92,7 @@ bootDemo(
           const w = Math.max(2, ctx2.width);
           const h = Math.max(2, ctx2.height);
           const s = Math.min(w, h);
-          const viewProj = Mat4.ortho(0, w, h, 0, -1, 1);
+
 
           c2d.setViewportSize(w, h);
           c2d.begin();
@@ -308,7 +307,7 @@ bootDemo(
             // 虚线 + 阴影的圆角矩形。
             // 先垫一块浅色「卡片」再投影：深色背景上黑影几乎看不出来（阴影要落在
             // 比它亮的东西上才看得见），这块卡片就是为了让 shadowBlur 一眼能看见。
-            c2d.fillStyle = "#31405e";
+            c2d.fillStyle = "#ffffff";
             c2d.beginPath();
             c2d.roundRect(x0 - box * 0.6, y0 + box * 0.96, box * 1.1, box * 0.3, box * 0.05);
             c2d.fill();
@@ -358,7 +357,8 @@ bootDemo(
             c2d.globalAlpha = 1;
           }
 
-          c2d.flush(pass, viewProj);
+          // 不传投影 = 内置**网页坐标系**（原点左上、y 向下、1 单位 = 1 逻辑像素）
+          c2d.flush(pass);
         },
       };
     },

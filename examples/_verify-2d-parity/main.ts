@@ -13,12 +13,20 @@
 import { createDevice } from "../../src/device/createDevice.js";
 import { RenderTarget } from "../../src/render/RenderTarget.js";
 import { Canvas2D, LinearGradient, RadialGradient } from "../../src/render2d/index.js";
-import { Mat4 } from "../../src/math/mat4.js";
 
+/** 逻辑（网页/CSS）尺寸：场景布局与分区坐标都用它 */
 const W = 480;
 const H = 270;
 const params = new URLSearchParams(location.search);
 const SAMPLES = Math.max(1, Math.floor(Number(params.get("msaa") ?? 4)));
+/**
+ * 逻辑像素 → 物理像素倍率（`?ratio=2`）。给框架侧 `Canvas2D({pixelRatio})`，
+ * 原生侧对应 `ctx.scale(ratio, ratio)` —— 两边都用「网页坐标系」画同一份代码。
+ */
+const RATIO = Math.max(0.25, Number(params.get("ratio") ?? 1));
+/** 物理尺寸：目标/画布大小 */
+const PW = Math.max(1, Math.round(W * RATIO));
+const PH = Math.max(1, Math.round(H * RATIO));
 
 // ---------------------------------------------------------------------------
 // 场景：只使用「原生与框架都支持」的 API，两边跑同一份代码
@@ -1009,14 +1017,19 @@ const scene = SCENES[sceneId] ?? SCENES.parity!;
 const activeRegions = scene.regions;
 
 function compare(a: Uint8ClampedArray | Uint8Array, b: Uint8ClampedArray | Uint8Array): { overall: Region; regions: Region[] } {
-  const region = (x0: number, y0: number, w: number, h: number): { mean: number; over16: number; over48: number } => {
+  // 分区坐标是**逻辑（网页）坐标**，按 RATIO 放大到物理像素再取样
+  const region = (lx0: number, ly0: number, lw: number, lh: number): { mean: number; over16: number; over48: number } => {
+    const x0 = Math.floor(lx0 * RATIO);
+    const y0 = Math.floor(ly0 * RATIO);
+    const x1 = Math.min(PW, Math.ceil((lx0 + lw) * RATIO));
+    const y1 = Math.min(PH, Math.ceil((ly0 + lh) * RATIO));
     let sum = 0;
     let n = 0;
     let o16 = 0;
     let o48 = 0;
-    for (let y = y0; y < y0 + h; y++) {
-      for (let x = x0; x < x0 + w; x++) {
-        const i = (y * W + x) * 4;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * PW + x) * 4;
         const d = (Math.abs(a[i]! - b[i]!) + Math.abs(a[i + 1]! - b[i + 1]!) + Math.abs(a[i + 2]! - b[i + 2]!)) / 3;
         sum += d;
         n++;
@@ -1072,13 +1085,15 @@ async function main(): Promise<void> {
 
   // ---- 原生 ----
   const nativeCanvas = document.createElement("canvas");
-  nativeCanvas.width = W;
-  nativeCanvas.height = H;
-  nativeCanvas.style.cssText = "display:block;width:480px;height:270px";
+  nativeCanvas.width = PW;
+  nativeCanvas.height = PH;
+  nativeCanvas.style.cssText = `display:block;width:${W}px;height:${H}px`;
   const nctx = nativeCanvas.getContext("2d", { willReadFrequently: true })!;
-  nctx.clearRect(0, 0, W, H);
+  nctx.clearRect(0, 0, PW, PH);
+  // 原生侧同样按「网页坐标系」画：逻辑像素 × RATIO（等价于 CSS 尺寸 + DPR）
+  nctx.scale(RATIO, RATIO);
   scene.draw(nctx as unknown as SceneCtx, nativeFactory(nctx));
-  const nativeData = nctx.getImageData(0, 0, W, H).data;
+  const nativeData = nctx.getImageData(0, 0, PW, PH).data;
   nativeSlot.appendChild(nativeCanvas);
 
   // ---- 框架 ----
@@ -1088,13 +1103,14 @@ async function main(): Promise<void> {
   const device = await createDevice({ canvas: uniCanvas, backend: (params.get("backend") ?? "auto") as "auto" | "webgpu" | "webgl2" | "mock" });
   const target = new RenderTarget(device, {
     label: "parity-2d",
-    width: W,
-    height: H,
+    width: PW,
+    height: PH,
     depth: false,
     sampleCount: SAMPLES,
     format: device.canvasFormat() ?? "rgba8unorm",
   });
-  const c2d = new Canvas2D(device);
+  // 框架侧用「网页坐标系」：pixelRatio = RATIO，flush 不传投影（用内置的网页坐标投影）
+  const c2d = new Canvas2D(device, { pixelRatio: RATIO });
   // 调试用：把实例暴露出来（无头排查时可以直接读图层纹理内容）
   (globalThis as Record<string, unknown>).__c2d = c2d;
   const encoder = device.createCommandEncoder("parity");
@@ -1103,19 +1119,19 @@ async function main(): Promise<void> {
     colorAttachments: [target.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
     depthStencilAttachment: null,
   });
-  c2d.setViewportSize(W, H);
+  c2d.setViewportSize(PW, PH);
   c2d.begin();
   scene.draw(c2d as unknown as SceneCtx, oursFactory());
-  c2d.flush(pass, Mat4.ortho(0, W, H, 0, -1, 1));
+  c2d.flush(pass);
   pass.end();
   device.submit([encoder.finish()]);
 
   const ours = await target.readPixels();
   const ourCanvas = document.createElement("canvas");
-  ourCanvas.width = W;
-  ourCanvas.height = H;
-  ourCanvas.style.cssText = "display:block;width:480px;height:270px";
-  ourCanvas.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(ours), W, H), 0, 0);
+  ourCanvas.width = PW;
+  ourCanvas.height = PH;
+  ourCanvas.style.cssText = `display:block;width:${W}px;height:${H}px`;
+  ourCanvas.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(ours), PW, PH), 0, 0);
   oursSlot.appendChild(ourCanvas);
 
   // 半透明区域若两侧 alpha 语义不同，先确认一下
@@ -1130,10 +1146,10 @@ async function main(): Promise<void> {
     for (let dx = -3; dx <= 3; dx++) {
       let sum = 0;
       let n = 0;
-      for (let y = 4; y < H - 4; y++) {
-        for (let x = 4; x < W - 4; x++) {
-          const i = (y * W + x) * 4;
-          const j = ((y + dy) * W + (x + dx)) * 4;
+      for (let y = 4; y < PH - 4; y++) {
+        for (let x = 4; x < PW - 4; x++) {
+          const i = (y * PW + x) * 4;
+          const j = ((y + dy) * PW + (x + dx)) * 4;
           sum += (Math.abs(nativeData[i]! - ours[j]!) + Math.abs(nativeData[i + 1]! - ours[j + 1]!) + Math.abs(nativeData[i + 2]! - ours[j + 2]!)) / 3;
           n++;
         }
@@ -1151,15 +1167,15 @@ async function main(): Promise<void> {
   for (let cy = 0; cy < ROWS; cy++) {
     let line = "";
     for (let cx = 0; cx < COLS; cx++) {
-      const x0 = Math.floor((cx * W) / COLS);
-      const x1 = Math.max(x0 + 1, Math.floor(((cx + 1) * W) / COLS));
-      const y0 = Math.floor((cy * H) / ROWS);
-      const y1 = Math.max(y0 + 1, Math.floor(((cy + 1) * H) / ROWS));
+      const x0 = Math.floor((cx * PW) / COLS);
+      const x1 = Math.max(x0 + 1, Math.floor(((cx + 1) * PW) / COLS));
+      const y0 = Math.floor((cy * PH) / ROWS);
+      const y1 = Math.max(y0 + 1, Math.floor(((cy + 1) * PH) / ROWS));
       let sum = 0;
       let n = 0;
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
-          const i = (y * W + x) * 4;
+          const i = (y * PW + x) * 4;
           sum += (Math.abs(nativeData[i]! - ours[i]!) + Math.abs(nativeData[i + 1]! - ours[i + 1]!) + Math.abs(nativeData[i + 2]! - ours[i + 2]!)) / 3;
           n++;
         }
@@ -1170,7 +1186,7 @@ async function main(): Promise<void> {
   }
 
   const lines = [
-    `${device.kind} · msaa=${target.sampleCount} · ${W}x${H}`,
+    `${device.kind} · msaa=${target.sampleCount} · 物理 ${PW}x${PH}（网页坐标 ${W}x${H} · ratio=${RATIO}）`,
     `整幅      mean=${overall.mean.toFixed(2)}  >16:${(overall.over16 * 100).toFixed(2)}%  >48:${(overall.over48 * 100).toFixed(2)}%`,
     ...regions.map((r) => `${r.name.padEnd(8, " ")}  mean=${r.mean.toFixed(2).padStart(6)}  >16:${(r.over16 * 100).toFixed(2).padStart(5)}%  >48:${(r.over48 * 100).toFixed(2).padStart(5)}%`),
     `最优偏移  dx=${best.dx} dy=${best.dy} mean=${best.mean.toFixed(2)}（0,0 时 ${overall.mean.toFixed(2)}）`,
@@ -1195,8 +1211,10 @@ async function main(): Promise<void> {
     ["星形内部", 376, 66],
     ["圆内部", 300, 190],
   ];
-  const px = (d: Uint8ClampedArray | Uint8Array, x: number, y: number) => {
-    const i = (y * W + x) * 4;
+  const px = (d: Uint8ClampedArray | Uint8Array, lx: number, ly: number) => {
+    const x = Math.min(PW - 1, Math.round(lx * RATIO));
+    const y = Math.min(PH - 1, Math.round(ly * RATIO));
+    const i = (y * PW + x) * 4;
     return `${d[i]},${d[i + 1]},${d[i + 2]}`;
   };
   for (const [name, x, y] of PROBES) {
@@ -1206,8 +1224,11 @@ async function main(): Promise<void> {
   const result = {
     backend: device.kind,
     msaa: target.sampleCount,
-    width: W,
-    height: H,
+    ratio: RATIO,
+    width: PW,
+    height: PH,
+    cssWidth: W,
+    cssHeight: H,
     mean: Number(overall.mean.toFixed(3)),
     over16: Number((overall.over16 * 100).toFixed(2)),
     over48: Number((overall.over48 * 100).toFixed(2)),

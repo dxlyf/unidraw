@@ -15,7 +15,6 @@
  */
 import { Renderer } from "../../src/render/Renderer.js";
 import { Canvas2D } from "../../src/render2d/index.js";
-import { Mat4 } from "../../src/math/mat4.js";
 
 const params = new URLSearchParams(location.search);
 
@@ -37,7 +36,6 @@ const renderer = await Renderer.create(canvas, {
 const c2d = new Canvas2D(renderer.device);
 const w = canvas.width;
 const h = canvas.height;
-const ortho = Mat4.ortho(0, w, h, 0, -1, 1);
 
 // 自动化探针钩子（与 examples/common/demo.ts 保持一致）
 (globalThis as Record<string, unknown>).__unidraw = {
@@ -84,7 +82,8 @@ const frame = (): void => {
   c2d.fillStyle = "#0000ff";
   c2d.fillRect(10, 150, 100, 40);
 
-  c2d.flush(pass, ortho);
+  // 不传投影 = 用内置的**网页坐标系**（原点左上、y 向下、1 单位 = 1 逻辑像素）
+  c2d.flush(pass);
   renderer.endFrame();
   requestAnimationFrame(frame);
 };

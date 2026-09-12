@@ -14,6 +14,13 @@ export type TextBaseline = "alphabetic" | "top" | "middle" | "bottom" | "hanging
 
 export interface Canvas2DOptions {
   vertexCapacity?: number;
+  /**
+   * 逻辑像素（网页坐标）→ 物理像素的倍率，等价 `devicePixelRatio`，默认 1。
+   *
+   * 给了它就表示「用户坐标按**逻辑像素**写」，框架自己乘倍率画到物理像素
+   * （见 `Canvas2D.setPixelRatio`）。
+   */
+  pixelRatio?: number;
 }
 
 export interface DeviceRect {

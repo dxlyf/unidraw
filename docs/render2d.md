@@ -7,19 +7,19 @@
 
 ```ts
 import { createDevice, Canvas2D, LinearGradient } from "unidraw";
-import { Mat4 } from "unidraw";
 
 const device = await createDevice({ canvas, backend: "auto" });
-const c2d = new Canvas2D(device);
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+const c2d = new Canvas2D(device, { pixelRatio: dpr });   // 用户坐标 = 网页/CSS 像素
 const pass = /* 每帧 beginFrame 得到的 RenderPassEncoder */;
 
 // 每帧：
-c2d.setViewportSize(canvas.width, canvas.height);
+c2d.setViewportSize(canvas.width, canvas.height);        // 物理像素
 c2d.begin();
 
 c2d.fillStyle = "#ff5c7a";
 c2d.beginPath();
-c2d.roundRect(20, 20, 160, 90, [40, 8, 8, 40]);
+c2d.roundRect(20, 20, 160, 90, [40, 8, 8, 40]);          // 这几个数就是 CSS 像素
 c2d.fill();
 
 c2d.fillStyle = new LinearGradient(0, 200, 400, 200).addColorStop(0, "#4c8dff").addColorStop(1, "#35d7ee");
@@ -36,11 +36,29 @@ c2d.font = "600 28px system-ui";
 c2d.fillStyle = "#f2f5ff";
 c2d.fillText("你好 2D", 40, 420);
 
-c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
+c2d.flush(pass);   // 不传投影 = 用内置的网页坐标系
 ```
 
-坐标体系：**像素坐标、原点左上**（由你传入的 `Mat4.ortho(0,w,h,0,…)` 决定），
-与示例保持一致。
+## 坐标系
+
+**默认就是网页坐标系**：原点在**左上角**、**y 向下**、1 单位 = 1 **逻辑像素**
+（CSS 像素）——和 `fillRect(10, 10, …)` 画在原生 canvas 上的直觉一致，不需要自己
+准备 `Mat4.ortho`。
+
+- `flush(pass, viewProj?)`：`viewProj` 省略时用内置投影（等价
+  `Mat4.ortho(0, 物理宽, 物理高, 0, -1, 1)`）。要用**别的坐标系**（把 2D 贴进 3D
+  场景、世界空间 HUD、只有一块子区域等）就自己传一个矩阵；
+- `setViewportSize(w, h)` 给的是**物理像素**（`canvas.width/height`），离屏图层与
+  scissor 都按它算；
+- `setPixelRatio(dpr)`（或构造参数 `{ pixelRatio }`）设置「逻辑像素 → 物理像素」
+  倍率，默认 1。高分屏上按 `devicePixelRatio` 设上它，同一段绘制代码在任何 DPR 下
+  看起来都一样大，和 DOM/CSS 的语义一致；
+- 倍率作用于**整条链路**：几何、`clipRect`/`clip` 的换算、文字字形栅格化（按设备
+  字号栅格化 → 高分屏不糊）、`drawImage` 目标矩形都是同一套换算；
+- 验证：`examples/_verify-2d-parity?ratio=2` 会同时把框架侧设成 `pixelRatio: 2`、
+  原生侧 `ctx.scale(2,2)`，两边跑同一份「网页坐标」绘制代码逐像素对比
+  （几何/渐变/圆角/裁剪分区 ≤ 0.55，与 `ratio=1` 同级；文字因为字形 hinting 与原生
+  `ctx.scale` 路径不同，约 9.8）。
 
 ## 能力清单
 
