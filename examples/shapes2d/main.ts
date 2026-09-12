@@ -305,12 +305,18 @@ bootDemo(
             c2d.globalAlpha = 1;
             c2d.globalCompositeOperation = "source-over";
 
-            // 虚线 + 阴影的圆角矩形
+            // 虚线 + 阴影的圆角矩形。
+            // 先垫一块浅色「卡片」再投影：深色背景上黑影几乎看不出来（阴影要落在
+            // 比它亮的东西上才看得见），这块卡片就是为了让 shadowBlur 一眼能看见。
+            c2d.fillStyle = "#31405e";
+            c2d.beginPath();
+            c2d.roundRect(x0 - box * 0.6, y0 + box * 0.96, box * 1.1, box * 0.3, box * 0.05);
+            c2d.fill();
             if (state.shadow) {
-              c2d.shadowColor = "rgba(0, 0, 0, 0.7)";
-              c2d.shadowBlur = s * 0.02;
-              c2d.shadowOffsetX = s * 0.01;
-              c2d.shadowOffsetY = s * 0.008;
+              c2d.shadowColor = "rgba(0, 0, 0, 0.75)";
+              c2d.shadowBlur = s * 0.03;
+              c2d.shadowOffsetX = s * 0.012;
+              c2d.shadowOffsetY = s * 0.01;
             }
             c2d.fillStyle = C.yellow;
             c2d.beginPath();
