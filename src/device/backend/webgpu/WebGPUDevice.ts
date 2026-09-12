@@ -142,34 +142,54 @@ export class WebGPUDevice extends Device {
   /**
    * 纹理回读：`copyTextureToBuffer` + `mapAsync`。
    * WebGPU 要求每行字节数为 256 的倍数，因此回读缓冲带行间距，之后重排为紧凑 RGBA。
+   *
+   * 深度/模板格式与多重采样纹理还要求 copy **覆盖整个子资源**（整幅宽高），所以这两类
+   * 只能先整幅拷回、再在 CPU 上裁出请求的区域；否则 WebGPU 直接报校验错误、缓冲为 0。
    */
   override async readTexturePixels(texture: Texture, options: ReadPixelsOptions = {}): Promise<Uint8Array> {
     const rect = resolveReadRect(texture, options);
     assert((texture.usage & TextureUsage.COPY_SRC) !== 0, "readTexturePixels 需要纹理带 COPY_SRC 用途");
     const tex = texture as WebGPUTexture;
     const bpt = rect.bytesPerTexel;
-    const tight = rect.width * bpt;
+    const wholeRequired = rect.depth || tex.sampleCount > 1;
+    const copyX = wholeRequired ? 0 : rect.x;
+    const copyY = wholeRequired ? 0 : rect.y;
+    const copyW = wholeRequired ? texture.width : rect.width;
+    const copyH = wholeRequired ? texture.height : rect.height;
+    const tight = copyW * bpt;
     const bytesPerRow = align256(tight);
     const buffer = this.gpu.createBuffer({
       label: "unidraw-readback",
-      size: bytesPerRow * rect.height,
+      size: bytesPerRow * copyH,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.gpu.createCommandEncoder({ label: "unidraw-readback" });
     encoder.copyTextureToBuffer(
-      { texture: tex.gpuTexture, origin: { x: rect.x, y: rect.y } },
-      { buffer, bytesPerRow, rowsPerImage: rect.height },
-      { width: rect.width, height: rect.height, depthOrArrayLayers: 1 },
+      // 分层回读：origin.z = 层号（cube 的面 / 2D 数组的层）
+      { texture: tex.gpuTexture, origin: { x: copyX, y: copyY, z: rect.layer } },
+      { buffer, bytesPerRow, rowsPerImage: copyH },
+      { width: copyW, height: copyH, depthOrArrayLayers: 1 },
     );
     this.gpu.queue.submit([encoder.finish()]);
     this.markSubmitted();
 
     await buffer.mapAsync(GPUMapMode.READ);
     const src = new Uint8Array(buffer.getMappedRange());
-    const tiers = new Uint8Array(tight * rect.height);
-    repackRows(src, bytesPerRow, rect.width, rect.height, tiers, bpt);
+    const copied = new Uint8Array(tight * copyH);
+    repackRows(src, bytesPerRow, copyW, copyH, copied, bpt);
     buffer.unmap();
     buffer.destroy();
+    // 整幅拷回时裁出请求区域（左上原点）
+    const tiers = new Uint8Array(rect.width * rect.height * bpt);
+    if (copyW === rect.width && copyH === rect.height) {
+      tiers.set(copied);
+    } else {
+      const rowBytes = rect.width * bpt;
+      for (let row = 0; row < rect.height; row++) {
+        const from = ((rect.y + row) * copyW + rect.x) * bpt;
+        tiers.set(copied.subarray(from, from + rowBytes), row * rowBytes);
+      }
+    }
     // 深度：单通道浮点铺成 RGBA 浮点（R = 深度），与 WebGL2 后端保持一致
     if (rect.depth) {
       const rgba = new Float32Array(rect.width * rect.height * 4);
@@ -177,8 +197,7 @@ export class WebGPUDevice extends Device {
       return new Uint8Array(rgba.buffer);
     }
     if (rect.bgra) swizzleBgraToRgbaInPlace(tiers);
-    const out = tiers;
-    return out;
+    return tiers;
   }
 
   // ---- 提交 ---------------------------------------------------------------

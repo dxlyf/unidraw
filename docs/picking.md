@@ -159,16 +159,25 @@ PICK_SELFTEST {"backend":"webgl2","samples":40,"agree":40,"ratio":1,"allAgree":t
 ```ts
 const pixels = await device.readTexturePixels(texture, { x, y, width, height });
 // 左上原点、紧凑 8bit RGBA（width*height*4）
+
+const hdr = await device.readTexturePixels(floatTex, { type: "float32" });   // rgba32float：每纹素 16B
+const depth = await device.readTexturePixels(depthTex, { type: "float32" }); // 深度：R = 深度值，GBA = 0/0/1
+const face1 = await device.readTexturePixels(cubeTex, { layer: 1 });         // 逐层/逐面（cube 面、数组层）
 ```
 
 | 后端 | 实现 | 备注 |
 | --- | --- | --- |
-| WebGL2 | 临时 FBO + `readPixels` + Y 翻转 | 纹理需 `RENDER_ATTACHMENT` |
-| WebGPU | `copyTextureToBuffer` + `mapAsync` | 纹理需 `COPY_SRC`；行按 256 字节对齐后重排 |
+| WebGL2 | 临时 FBO + `readPixels` | 8bit 颜色需 `RENDER_ATTACHMENT`；浮点需 `EXT_color_buffer_float`（设备构造时已请求）；**深度不能直接读**（Chrome/ANGLE 不支持），走「深度 → rgba32float 可视化 → 按颜色回读」 |
+| WebGPU | `copyTextureToBuffer` + `mapAsync` | 纹理需 `COPY_SRC`；行按 256 字节对齐后重排；深度/多重采样纹理只能整幅拷回（后端内部先整幅再裁剪） |
 | Mock | 直接读 CPU 像素 | 无头测试用 |
 
+行列翻转规则：只有 WebGL2 上「被当渲染附件写过」的纹理需要翻转 Y（GL 原点在左下），
+纯 `upload()` 的纹理按上传行序原样返回 —— 详见
+[architecture.md §8](architecture.md)。
+
 支持 `rgba8unorm` / `rgba8unorm-srgb` / `bgra8unorm` / `bgra8unorm-srgb`
-（后两者自动 swizzle 成 RGBA）。其他格式会抛错。
+（后两者自动 swizzle 成 RGBA）；`type: "float32"` 支持 `rgba32float` / `depth32float` /
+`depth24plus`。其他格式会抛错。
 
 ---
 

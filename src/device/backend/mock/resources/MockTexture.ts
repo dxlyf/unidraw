@@ -23,6 +23,10 @@ export class MockTexture extends Texture {
     return new MockTextureView(this);
   }
 
+  protected override createLayerView(baseArrayLayer: number, mipLevel: number): TextureView {
+    return new MockTextureView(this, baseArrayLayer, 1, mipLevel);
+  }
+
   override upload(data: ArrayBufferView, options: TextureUploadOptions = {}): void {
     if (!this.pixels) return;
     const x = options.x ?? 0;

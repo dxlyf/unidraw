@@ -19,7 +19,7 @@ const verifyPages = [
   { name: "_verify-sphere", title: "验证 · 极点无洞 + 离屏深度清除" },
   { name: "_verify-2d-clip", title: "验证 · 2D 合批与文本缓冲（WebGL2 索引绑定）" },
   { name: "_verify-2d-parity", title: "验证 · 与原生 Canvas2D 的逐像素对照" },
-  { name: "_verify-texture-dims", title: "验证 · 3D / 2D 数组 / cube 纹理维度" },
+  { name: "_verify-texture-dims", title: "验证 · 纹理维度 / 分层附件 / 浮点·深度回读" },
 ];
 
 const demos = [

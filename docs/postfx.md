@@ -37,12 +37,35 @@ target.dispose();
 | --- | --- |
 | `texture` | **解析后**的可采样结果（MSAA 时也是它） |
 | `depth` | 深度纹理（未开深度为 `null`） |
-| `colorView()` / `depthView()` | 渲染用附件视图（MSAA 时是多采样纹理） |
-| `resolveView()` | MSAA 解析目标视图；非 MSAA 为 `null` |
-| `sampleCount` | 实际生效的采样数（已按 `device.limits.maxSamples` 降级） |
+| `colorView(layer?)` / `depthView(layer?)` | 渲染用附件视图（MSAA 时是多采样纹理；分层模式下按层取） |
+| `resolveView(layer?)` | MSAA 解析目标视图；非 MSAA 为 `null` |
+| `sampleCount` | 实际生效的采样数（已按 `device.limits.maxSamples` 降级；**分层模式恒为 1**） |
+| `dimension` / `depthOrArrayLayers` | 纹理维度与层数（分层模式用） |
 
 `colorAttachment()` 会自动带上 `resolveTo` 与 `sampleCount`，`depthAttachment()` 同理，
 所以**使用方不需要知道后端怎么做 MSAA**。
+
+### 分层渲染目标（纹理数组 / cube）
+
+```ts
+// 一张 6 层深度数组：每层一趟 pass —— 点光源 cube 阴影就是这种写法
+const target = new RenderTarget(device, {
+  width: 1024, height: 1024, dimension: "2d-array", depthOrArrayLayers: 6, depth: "depth32float",
+});
+for (let f = 0; f < 6; f++) {
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [],
+    depthStencilAttachment: target.depthAttachment({ layer: f }),
+  });
+  // …按第 f 个方向渲染…
+  pass.end();
+}
+const faceDepth = await device.readTexturePixels(target.depth!, { layer: 0, type: "float32" });
+// 采样整幅：target.texture.view()（2d-array / cube 视图）
+```
+
+`dimension: "cube"` 时 `layer` 就是面序号（0..5），`texture` 可以直接当 cube 贴图采样。
+分层与多重采样不能共存（分层目标的 `sampleCount` 会被降级成 1），两个后端行为一致。
 
 ## 2. MSAA 在三后端的实现
 

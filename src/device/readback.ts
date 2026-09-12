@@ -27,6 +27,8 @@ export interface ReadPixelsOptions {
   height?: number;
   /** 输出数据类型（默认 `"uint8"`） */
   type?: ReadPixelsType;
+  /** 层号（3D / 2D 数组的层，cube 的面；默认 0） */
+  layer?: number;
 }
 
 export interface ReadRect {
@@ -34,6 +36,8 @@ export interface ReadRect {
   y: number;
   width: number;
   height: number;
+  /** 读哪一层（3D/数组层号 / cube 面序号） */
+  layer: number;
   /** 是否为 BGRA 纹理（读回后需 swizzle） */
   bgra: boolean;
   /** 每纹素字节数（uint8 RGBA = 4，float32 = 16，深度 = 4） */
@@ -72,7 +76,9 @@ export function resolveReadRect(texture: Texture, options: ReadPixelsOptions = {
   const depth = DEPTH.has(texture.format);
   const float = type === "float32";
   const bytesPerTexel = float ? (depth ? 4 : 16) : 4;
-  return { x, y, width, height, bgra, bytesPerTexel, float, depth };
+  const layer = Math.max(0, Math.floor(options.layer ?? 0));
+  assert(layer < texture.depthOrArrayLayers, `readTexturePixels 层号越界：${layer} >= ${texture.depthOrArrayLayers}`);
+  return { x, y, width, height, layer, bgra, bytesPerTexel, float, depth };
 }
 
 /** 上下翻转（WebGL2 的 readPixels 自下而上）。 */

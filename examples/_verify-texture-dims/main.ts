@@ -1,5 +1,5 @@
 /**
- * 纹理维度验证页（3D / 2D 数组 / cube）
+ * 纹理维度验证页（3D / 2D 数组 / cube + 分层渲染附件 + 浮点/深度回读）
  *
  * 这两个后端都要能创建、逐层上传、并让内容真正落到位。这里不做着色器采样，而是
  * **用原生句柄把每一层读回来**对账（WebGL2 `framebufferTextureLayer` + `readPixels`，
@@ -7,7 +7,12 @@
  *
  * - `TextureDescriptor.dimension / depthOrArrayLayers` 是否被两个后端正确落实；
  * - `upload(..., { z, depth })` 是否写到了正确的层；
- * - cube 的 6 个面是否各自独立（WebGL2 走 `texStorage2D(TEXTURE_CUBE_MAP)`）。
+ * - cube 的 6 个面是否各自独立（WebGL2 走 `texStorage2D(TEXTURE_CUBE_MAP)`）；
+ * - **分层渲染附件**：`RenderTarget({ dimension })` + `colorAttachment({ layer })`
+ *   逐层/逐面清成不同颜色，再用 `readTexturePixels({ layer })` 逐层读回；
+ * - 浮点回读（`rgba32float`）与深度回读（`depth32float` / 分层深度数组）；
+ * - **回读行序**：上传纹理的第 0 行必须原样出现在输出第 0 行（WebGL2 的
+ *   「渲染过的纹理」与「上传的纹理」内存行序相反，曾经统一翻转导致过上下颠倒）。
  *
  * 控制台打印 `TEXDIMS_SELFTEST {...}`，同时挂在 `window.__texdims` 上供探针读取。
  */
@@ -180,6 +185,99 @@ async function main(): Promise<void> {
   (result as Record<string, unknown>).depthSample = ddata[0];
   (result as Record<string, unknown>).floatErr = floatErr;
   (result as Record<string, unknown>).depthErr = depthErr;
+
+  // 6) 行序：上传 3 行（红/绿/蓝）后原样回读。
+  // 这一项抓到过一个真 bug：WebGL2 里「被渲染附件写过」的纹理与「只用 upload 写过」
+  // 的纹理内存行序相反，早先统一翻转 Y，导致上传纹理回读出来上下颠倒
+  // （WebGPU 侧一直是对的，所以只看单后端发现不了）。两边的第 0 行都必须还是红。
+  const rows = device.createTexture({
+    label: "verify-row-order",
+    width: 1,
+    height: 3,
+    format: "rgba8unorm",
+    usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
+  });
+  rows.upload(new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]));
+  const rowPixels = Array.from(await device.readTexturePixels(rows));
+  const rowOrderOk = rowPixels.slice(0, 4).join(",") === "255,0,0,255" && rowPixels.slice(4, 8).join(",") === "0,255,0,255";
+  (result as Record<string, unknown>).rowOrderOk = rowOrderOk;
+  (result as Record<string, unknown>).rowPixels = rowPixels;
+
+  // 7) 分层渲染附件：每层/每面清成不同的 R 值，再逐层回读
+  //    （cube 逐面 + 2D 数组逐层 = 点光源 cube 阴影那种写法的地基）
+  const layered: Record<string, unknown> = {};
+  for (const [tag, dim, layers] of [
+    ["array", "2d-array", 3],
+    ["cube", "cube", 6],
+  ] as const) {
+    const rt = new RenderTarget(device, {
+      label: `verify-layer-${tag}`,
+      width: SIZE,
+      height: SIZE,
+      depth: false,
+      sampleCount: 4, // 分层模式必须被降级成 1（WebGL2 无法做分层多重采样附件）
+      dimension: dim,
+      depthOrArrayLayers: dim === "cube" ? undefined : layers,
+    });
+    const count = rt.depthOrArrayLayers;
+    const enc = device.createCommandEncoder(`verify-layer-${tag}`);
+    for (let l = 0; l < count; l++) {
+      const pass = enc.beginRenderPass({
+        label: `layer-${l}`,
+        colorAttachments: [rt.colorAttachment({ layer: l, clearValue: { r: (l + 1) * 32 / 255, g: 0, b: 0, a: 1 } })],
+        depthStencilAttachment: null,
+      });
+      pass.end();
+    }
+    device.submit([enc.finish()]);
+    const reads: number[] = [];
+    for (let l = 0; l < count; l++) {
+      const px = await device.readTexturePixels(rt.texture, { layer: l, width: 1, height: 1 });
+      reads.push(px[0]!);
+    }
+    const expect = Array.from({ length: count }, (_, l) => (l + 1) * 32);
+    layered[`${tag}Ok`] = reads.join(",") === expect.join(",");
+    layered[`${tag}Reads`] = reads;
+    layered[`${tag}Count`] = count;
+    layered[`${tag}SampleCount`] = rt.sampleCount;
+    rt.dispose();
+  }
+
+  // 8) 分层深度：2D 数组深度逐层清成不同值再逐层回读（点光源 cube 阴影的深度布局）
+  const depthRt = new RenderTarget(device, {
+    label: "verify-layer-depth",
+    width: SIZE,
+    height: SIZE,
+    depth: "depth32float",
+    dimension: "2d-array",
+    depthOrArrayLayers: 2,
+  });
+  const denc2 = device.createCommandEncoder("verify-layer-depth");
+  for (let l = 0; l < 2; l++) {
+    const pass = denc2.beginRenderPass({
+      label: `depth-layer-${l}`,
+      colorAttachments: [],
+      depthStencilAttachment: depthRt.depthAttachment({ layer: l, depthClearValue: l === 0 ? 0.25 : 0.75 }),
+    });
+    pass.end();
+  }
+  device.submit([denc2.finish()]);
+  const depthReads: number[] = [];
+  let layeredDepthErr = "";
+  try {
+    for (let l = 0; l < 2; l++) {
+      const px = depthRt.depth ? await device.readTexturePixels(depthRt.depth, { layer: l, type: "float32", width: 1, height: 1 }) : new Uint8Array(0);
+      depthReads.push(px.length ? new Float32Array(px.buffer)[0]! : NaN);
+    }
+  } catch (e) {
+    layeredDepthErr = e instanceof Error ? e.message : String(e);
+  }
+  layered.layeredDepthOk = depthReads.length === 2 && Math.abs(depthReads[0]! - 0.25) < 0.01 && Math.abs(depthReads[1]! - 0.75) < 0.01;
+  layered.layeredDepthReads = depthReads;
+  layered.layeredDepthErr = layeredDepthErr;
+  depthRt.dispose();
+  (result as Record<string, unknown>).layered = layered;
+
   // 全局要在**补齐 float/depth 字段之后**再写一次，探针读的是这里
   (globalThis as Record<string, unknown>).__texdims = result;
   console.log("TEXDIMS_SELFTEST " + JSON.stringify(result));

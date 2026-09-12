@@ -330,10 +330,30 @@ CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种�
 
 ## 8. 纹理回读与 GPU 颜色拾取
 
-- `device.readTexturePixels(texture, rect)` 统一三后端，输出左上原点、紧凑 8bit RGBA：
-  - WebGL2：临时 FBO + `readPixels` + 行翻转；
+- `device.readTexturePixels(texture, rect)` 统一三后端，输出左上原点、紧凑 RGBA：
+  - WebGL2：临时 FBO + `readPixels` + **按需**行翻转；
   - WebGPU：`copyTextureToBuffer`（行按 256B 对齐）+ `mapAsync` + 重排；
   - Mock：直接读 CPU 像素。
+- **行序规则（曾经踩过的坑）**：WebGL2 里「被当渲染附件写过」的纹理，内存第 0 行是
+  画面**下方**（GL 原点在左下），要翻转；而只用 `upload()` 写入的纹理第 0 行就是上传的
+  第 0 行，**不能**翻转（翻转会得到上下颠倒的图）。后端用 `GLTexture.usedAsAttachment`
+  区分这两种来源（MSAA 的 resolve 目标也算「渲染过」）。WebGPU 两种情况都不需要翻转，
+  于是两侧输出一致 —— 这条规则是 `readTexturePixels` 跨后端一致的前提，
+  `examples/_verify-texture-dims` 的「行序」一项专门守着它。
+- `type: "float32"` 回读 `rgba32float` 与深度纹理（每纹素 16 字节，深度值在 R 通道，
+  GBA = 0/0/1）。两个后端的实现差异：
+  - WebGPU：直接 `copyTextureToBuffer`；深度/多重采样纹理要求 copy **覆盖整个子资源**，
+    所以请求子区域时后端先整幅拷回再在 CPU 上裁剪；
+  - WebGL2：颜色浮点要 `EXT_color_buffer_float`（设备构造时即请求，**不能**等到回读时
+    才请求 —— 那时 `getFramebuffer` 已经按「不可渲染」校验过一遍）；
+    **深度走不了 `readPixels`**：Chrome/ANGLE 对深度附件一律返回 `INVALID_OPERATION`
+    （DEPTH_COMPONENT 的 UNSIGNED_INT/UNSIGNED_SHORT/FLOAT、DEPTH_STENCIL/UNSIGNED_INT_24_8
+    与 DEPTH_COMPONENT16/24/32F 全试过，FBO 完整、read buffer = NONE 也一样；
+    不会抛异常，只会静默返回 0），因此改成「深度 → rgba32float 可视化 pass → 按颜色回读」
+    （`backend/webgl2/depthVisualize.ts`，`sampler2D` 与 `sampler2DArray` 两个变体；
+    cube/3D 深度明确报错，不做错误近似）。
+- `layer` 选项支持**逐层/逐面回读**（cube 的面、2D 数组的层）：WebGL2 把该层挂成附件，
+  WebGPU 走 `origin.z`。
 - `ColorPicker` 用它实现 GPU 拾取：`IdMaterial` 把物体编号编码成颜色画到离屏
   `rgba8unorm` 纹理（带深度），回读目标像素即得物体。
   ID 本身也走「动态偏移环形 UBO」（binding 3），所以**一个材质实例**就能给全部物体
@@ -349,6 +369,16 @@ CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种�
   - WebGPU：多采样纹理 + `resolveTarget`（管线 `multisample.count` 必须与附件一致）；
   - WebGL2：多重采样 renderbuffer + `endRenderPass` 时 `blitFramebuffer` 解析；
   - Mock：只记录采样数（无头单测断言用）。
+- **分层模式**（`dimension: "2d-array" | "cube"`）：一张纹理有 `depthOrArrayLayers` 层，
+  附件按层取（`colorAttachment({ layer })` / `depthAttachment({ layer })`），
+  `texture.view()` 仍是整幅视图（可直接采样）。翻译方式：
+  - WebGPU：附件用 `createView({ dimension: "2d", baseArrayLayer, arrayLayerCount: 1 })`；
+  - WebGL2：2D 数组/3D 用 `framebufferTextureLayer`，**cube 必须用面目标**
+    （`framebufferTexture2D(TEXTURE_CUBE_MAP_POSITIVE_X + layer)`，用
+    `framebufferTextureLayer` 挂 cube 会得到不完整的 FBO）；
+  - 分层与多重采样不能共存（GL 的 MSAA 附件是 renderbuffer，只有整层），
+    因此分层目标的 `sampleCount` 统一降级为 1，保证两个后端一致；
+  - cube 颜色目标的深度附件用 2D 数组（WebGPU 不允许 cube 深度纹理）。
 - 管线按采样数缓存：`RenderPassEncoder.sampleCount` → 材质/效果选择匹配管线，
   使用方切 MSAA 不需要重建材质（`setSampleCount()` 只换场景目标）；
 - `EffectComposer` 的效果链写在**链路格式**的内部 ping-pong 目标上，最后用一趟
@@ -383,8 +413,12 @@ CPU 像素路径统一：`rgba8unorm` 等格式的 `Uint8Array` 上传到两种�
 - 单色附件渲染为主；MRT 在 WebGL2 端仅部分支持；
 - 纹理格式子集：`rgba8unorm(-srgb)/r8unorm/rg8unorm/r32float/rgba16float/
   rgba32float/depth24plus/depth32float`；无压缩纹理；
-- 回读仅支持 8bit 颜色纹理（`rgba8unorm/bgra8unorm` 系列）；
-- 阴影只覆盖方向光/聚光（点光 cube map 未实现）；无计算管线、无 storage buffer、无 indirect draw；
+- 回读支持 8bit 颜色、`rgba32float` 与深度（`type: "float32"`，可指定 `layer`）；
+  WebGL2 的深度回读要 2D 或 2D 数组深度纹理 + `EXT_color_buffer_float`
+  （cube/3D 深度明确报错），WebGPU 的深度/多重采样回读只能整幅子资源（后端内部先整幅
+  拷回再裁剪）；
+- 阴影只覆盖方向光/聚光（点光 cube map 未实现，分层附件与分层深度回读已就绪）；
+  无计算管线、无 storage buffer、无 indirect draw；
 - **着色器要成对写**：GLSL ES 3.00 与 WGSL 各一份（框架不做转译）—— 自定义材质 / 后处理 /
   全屏效果的日常成本就在这里；
 - WebGL2 侧 `maxAnisotropy` 与 WebGPU 侧 `generateMipmaps()` 尚未接到底层 API；

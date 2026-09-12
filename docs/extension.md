@@ -177,22 +177,25 @@ WebGL2 后端按 `(colorTexture, depthTexture)` 缓存 FBO。
    `getBufferSubData`，WebGPU 走 staging buffer + `mapAsync`），或者直接不支持；
 4. 它的典型用途（GPU 剔除、粒子）通常要和 7.2/7.3 配合，建议一起做。
 
-### 7.5 纹理维度：3D / array / cube
+### 7.5 纹理维度：3D / array / cube —— 已完成
 
-这是**收益最高**的一项（点光 cube map 阴影、图集、体纹理都卡在这里）：
+点光 cube map 阴影、图集、体纹理需要的部分都落地了，扩展别的后端时照这个清单抄：
 
-1. `TextureDescriptor` 加 `dimension?: "2d" | "3d" | "cube" | "2d-array"` 与
-   `depthOrArrayLayers?: number`；
-2. `resource/Texture.ts` 加对应只读字段，`createDefaultView()` 按维度建视图
-   （`GLTextureView` / `WebGPUTextureView` 各改一处）；
-3. WebGPU：`createTexture({ dimension, depthOrArrayLayers })` + `baseArrayLayer/arrayLayerCount`；
-4. WebGL2：`glUtils.ts` 里加 `TEXTURE_3D / TEXTURE_2D_ARRAY / TEXTURE_CUBE_MAP` 目标映射，
-   `GLTexture._allocate` 走 `texStorage3D`（cube 用 6 个面的 `texImage2D`）；
-   `TextureUploadOptions` 加 `z / layer / face` 与每层字节数，上传走 `texSubImage3D`；
-5. `render/RenderTarget.ts` 现在假设「2D 单层」（`colorAttachment` 一个 view）：
-   要支持分层渲染就给它加 `layer`/`face`，把附件 view 的 `baseArrayLayer` 指过去 ——
-   这一条做完，**点光 cube map 阴影**（`docs/shadows.md` 里那条「暂不支持」）就只差
-   每面各跑一趟深度 pass 了。
+1. `TextureDescriptor` 的 `dimension?: "2d" | "3d" | "cube" | "2d-array"` 与
+   `depthOrArrayLayers?: number`（已加）；
+2. `resource/Texture.ts`：只读字段 + `createDefaultView()`（整幅视图）与
+   `createLayerView(layer, mip)`（单层视图，供 `viewLayer()` 用）；
+3. WebGPU：`createTexture({ dimension, depthOrArrayLayers })`；单层视图用
+   `createView({ dimension: "2d", baseArrayLayer, arrayLayerCount: 1 })`；
+4. WebGL2：`GLTexture` 按维度选目标（`TEXTURE_3D / TEXTURE_2D_ARRAY / TEXTURE_CUBE_MAP`），
+   上传走 `texStorage3D` / `texSubImage3D`（cube 用面目标 `TEXTURE_CUBE_MAP_POSITIVE_X + z`）；
+5. `render/RenderTarget.ts` 的**分层模式**：`dimension` + `depthOrArrayLayers`，
+   附件按层取（`colorAttachment({ layer })`）。挂附件时三种写法不能混：cube 只能用面目标，
+   2D 数组/3D 用 `framebufferTextureLayer`，普通 2D 用 `framebufferTexture2D`；
+6. 分层与多重采样不能共存（GL 的 MSAA 附件是 renderbuffer，只有整层），分层目标统一
+   `sampleCount = 1`，保证两个后端行为一致；
+7. 剩下的活：**点光 cube map 阴影**——每面跑一趟深度 pass（`depthAttachment({ layer })`
+   已可用），再在材质里按方向采样，PCF/球谐部分可以直接复用现有方向光阴影代码。
 
 ### 7.6 压缩纹理（BC / ETC2 / ASTC）
 
@@ -204,17 +207,22 @@ WebGL2 后端按 `(colorTexture, depthTexture)` 缓存 FBO。
 3. 记得标注**能不能渲染/能不能 MSAA**（WebGL2 上压缩纹理做渲染目标基本不行），
    否则用户会在 attachment 处踩到「Framebuffer 不完整」。
 
-### 7.7 回读扩展（浮点 / 深度）
+### 7.7 回读扩展（浮点 / 深度 / 分层）—— 已完成
 
-现在 `readTexturePixels` 只支持 8bit 颜色（WebGL2 `gl.readPixels` + 行翻转/BGRA swizzle）。
-要做 HDR/深度回读：
+`ReadPixelsOptions` 现在有 `type: "uint8" | "float32"` 与 `layer`，两条原生路径都接好了。
+扩展新后端时注意这几条：
 
-- `ReadPixelsOptions`（`device/readback.ts`）加 `type: "uint8" | "float32" | "float16"`；
-- WebGL2：`gl.readPixels(FLOAT)` 需要 `EXT_color_buffer_float` 之类的扩展检测（读本身可以，
-  关键是目标格式能不能挂 FBO）；输出仍是行翻转；
-- WebGPU：**必须**先把纹理 `copyTextureToBuffer` 到一张 `COPY_DST | MAP_READ` 的 staging buffer，
-  再 `queue.readBuffer`（`mapAsync` + 等 `onSubmittedWorkDone`），并按 `bytesPerRow` 256 对齐
-  逐行解析 —— 这条路径框架里还没有，是 WebGPU 上回读浮点/深度的唯一办法。
+- WebGL2：颜色浮点回读**依赖 `EXT_color_buffer_float`**，而且必须在**设备构造时**就请求 ——
+  若等到回读时才 `getExtension`，之前的 `getFramebuffer` 已按「不可渲染」校验过，
+  会误报 `Framebuffer 不完整（0x8cd6）`；
+- WebGL2：**深度不能走 `readPixels`**。Chrome/ANGLE 对深度附件一律 `INVALID_OPERATION`
+  （DEPTH_COMPONENT 的 UNSIGNED_INT/UNSIGNED_SHORT/FLOAT、DEPTH_STENCIL/UNSIGNED_INT_24_8
+  与 DEPTH_COMPONENT16/24/32F 全试过；FBO 完整、`readBuffer(NONE)`、无 PBO 也一样），
+  不抛异常、缓冲保持全 0。做法是**深度 → rgba32float 可视化 pass → 按颜色回读**；
+- WebGPU：深度/多重采样纹理的 `copyTextureToBuffer` 必须**覆盖整个子资源**，
+  请求子区域时先整幅拷回、再在 CPU 上裁剪；
+- 行序：WebGL2 只有「被渲染附件写过的纹理」需要翻转 Y，纯 `upload()` 的纹理不能翻
+  （见 [architecture.md §8](architecture.md)）。
 
 ### 7.8 采样器与 mipmap 的两个漏项
 
@@ -228,8 +236,9 @@ WebGL2 后端按 `(colorTexture, depthTexture)` 缓存 FBO。
 
 ### 7.9 优先级与三条经验
 
-建议顺序：**7.5 纹理维度 > 7.7 回读 > 7.6 压缩纹理 > 7.8 > 7.2/7.3/7.4（compute 系）**。
-前两项是「能不能用」，compute 系是「换个架构」，而且 WebGL2 天然残缺。
+建议顺序：**7.6 压缩纹理 > 7.8 > 7.2/7.3/7.4（compute 系）**；7.5 纹理维度与 7.7 回读已经做完。
+剩下这些里，「点光 cube map 阴影」是收益最高的收尾工作（地基已就绪），
+compute 系是「换个架构」，而且 WebGL2 天然残缺。
 
 三条这个项目踩出来的经验，扩展时请务必遵守：
 

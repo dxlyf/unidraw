@@ -90,8 +90,11 @@ app.start();
 - `ShadowBlock`（binding 6）里矩阵/参数的数组长度；
 - 材质布局里声明的阴影贴图（binding 7..10）与采样器（binding 11..14）。
 
-> 点光阴影（cube map）**暂不支持**：WebGL2 没有分层渲染，需要在 6 个面上各跑一趟，
-> 目前先覆盖方向光/聚光这两个最常用的场景。
+> 点光阴影（cube map）**暂不支持**：需要在 6 个面上各跑一趟深度 pass。
+> 底层能力（分层渲染附件 + 分层深度回读）已经就绪 ——
+> `new RenderTarget(device, { dimension: "2d-array", depthOrArrayLayers: 6, depth: "depth32float" })`
+> 配合 `depthAttachment({ layer: f })` 就能逐面写深度，见 [postfx.md](postfx.md)「分层渲染目标」；
+> 剩下的是每帧遍历 6 个方向 + 在材质里按方向采样（PCF/球谐可复用现有方向光代码）。
 
 ## 4. 实现要点（扩展/排查时看这里）
 

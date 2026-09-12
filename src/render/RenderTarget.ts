@@ -34,10 +34,20 @@ export interface RenderTargetOptions {
   format?: TextureFormat;
   /** 是否带深度附件（默认 true），也可直接给深度格式 */
   depth?: boolean | TextureFormat;
-  /** MSAA 采样数（默认 1；超过 `device.limits.maxSamples` 自动降级） */
+  /** MSAA 采样数（默认 1；超过 `device.limits.maxSamples` 自动降级；分层模式强制 1） */
   sampleCount?: number;
   /** 结果是否可被采样（后处理需要，默认 true） */
   sampleable?: boolean;
+  /**
+   * 纹理维度（默认 `"2d"`）。
+   *
+   * `"2d-array"` / `"cube"` 时进入**分层模式**：一张纹理有 `depthOrArrayLayers` 层，
+   * 附件按层取（`colorAttachment({ layer })`），用来逐面渲染 cube 阴影、逐层渲染
+   * 纹理数组。`texture.view()` 仍是整幅视图（可直接采样）。
+   */
+  dimension?: "2d" | "2d-array" | "cube";
+  /** 层数/面数（默认 1；cube 恒为 6） */
+  depthOrArrayLayers?: number;
   label?: string;
 }
 
@@ -45,12 +55,18 @@ export interface ColorAttachmentOptions {
   loadOp?: LoadOp;
   storeOp?: StoreOp;
   clearValue?: ColorClearValue;
+  /** 渲染到第几层（cube 是面序号，默认 0） */
+  layer?: number;
 }
 
 export class RenderTarget {
   readonly device: Device;
   readonly format: TextureFormat;
   readonly sampleCount: number;
+  /** 纹理维度（`"2d"` / `"2d-array"` / `"cube"`） */
+  readonly dimension: "2d" | "2d-array" | "cube";
+  /** 层数/面数（cube 恒为 6） */
+  readonly depthOrArrayLayers: number;
 
   width: number;
   height: number;
@@ -64,9 +80,8 @@ export class RenderTarget {
   private readonly _depthFormat: TextureFormat | null;
   private _msaaColor: Texture | null = null;
   private _msaaDepth: Texture | null = null;
-  private _colorView: TextureView | null = null;
-  private _depthView: TextureView | null = null;
-  private _resolveView: TextureView | null = null;
+  /** 逐层视图缓存（分层模式下每层各有一套颜色/深度/解析视图） */
+  private readonly _views = new Map<number, { color: TextureView; depth: TextureView | null; resolve: TextureView | null }>();
 
   constructor(device: Device, options: RenderTargetOptions) {
     assert(options.width >= 1 && options.height >= 1, "RenderTarget 尺寸必须 >= 1");
@@ -76,8 +91,13 @@ export class RenderTarget {
     this._sampleable = options.sampleable !== false;
     this._depthFormat =
       options.depth === false ? null : typeof options.depth === "string" ? options.depth : "depth24plus";
+    this.dimension = options.dimension ?? "2d";
+    this.depthOrArrayLayers = this.dimension === "cube" ? 6 : Math.max(1, Math.floor(options.depthOrArrayLayers ?? 1));
     const maxSamples = Math.max(1, device.limits.maxSamples ?? 1);
-    this.sampleCount = Math.min(Math.max(1, Math.floor(options.sampleCount ?? 1)), maxSamples);
+    // 分层 + 多重采样在 WebGL2 上做不到（MSAA 附件是 renderbuffer，只能整层）：
+    // 为了两个后端行为一致，分层模式统一降级到 1，而不是让 WebGL2 报错。
+    const layered = this.dimension !== "2d" || this.depthOrArrayLayers > 1;
+    this.sampleCount = layered ? 1 : Math.min(Math.max(1, Math.floor(options.sampleCount ?? 1)), maxSamples);
     this.width = Math.max(1, Math.floor(options.width));
     this.height = Math.max(1, Math.floor(options.height));
     this._allocate();
@@ -95,40 +115,43 @@ export class RenderTarget {
     return true;
   }
 
-  /** 渲染用颜色附件视图（MSAA 时是多采样纹理） */
-  colorView(): TextureView {
-    return this._colorView!;
+  /** 渲染用颜色附件视图（MSAA 时是多采样纹理；`layer` 为层/面序号） */
+  colorView(layer = 0): TextureView {
+    return this._layerViews(layer).color;
   }
 
   /** 渲染用深度附件视图（MSAA 时是多采样深度） */
-  depthView(): TextureView | null {
-    return this._depthView;
+  depthView(layer = 0): TextureView | null {
+    return this._layerViews(layer).depth;
   }
 
   /** MSAA 解析目标视图（非 MSAA 时为 null，直接作为 `resolveTo` 传下去即可） */
-  resolveView(): TextureView | null {
-    return this._resolveView;
+  resolveView(layer = 0): TextureView | null {
+    return this._layerViews(layer).resolve;
   }
 
   /** 便捷：颜色附件描述（自动带 `resolveTo` / `sampleCount`） */
   colorAttachment(options: ColorAttachmentOptions = {}): ColorAttachmentOp {
+    const layer = Math.max(0, Math.floor(options.layer ?? 0));
     return {
-      view: this.colorView(),
+      view: this.colorView(layer),
       loadOp: options.loadOp ?? "clear",
       storeOp: options.storeOp ?? "store",
       clearValue: options.clearValue ?? { r: 0, g: 0, b: 0, a: 1 },
-      resolveTo: this._resolveView,
+      resolveTo: this.resolveView(layer),
       sampleCount: this.sampleCount,
     };
   }
 
   /** 便捷：深度附件描述（未开启深度时返回 null） */
   depthAttachment(
-    options: { depthLoadOp?: LoadOp; depthStoreOp?: StoreOp; depthClearValue?: number } = {},
+    options: { depthLoadOp?: LoadOp; depthStoreOp?: StoreOp; depthClearValue?: number; layer?: number } = {},
   ): DepthStencilAttachmentOp | null {
-    if (!this._depthView) return null;
+    const layer = Math.max(0, Math.floor(options.layer ?? 0));
+    const view = this.depthView(layer);
+    if (!view) return null;
     return {
-      view: this._depthView,
+      view,
       depthLoadOp: options.depthLoadOp ?? "clear",
       depthStoreOp: options.depthStoreOp ?? "store",
       depthClearValue: options.depthClearValue ?? 1,
@@ -136,9 +159,9 @@ export class RenderTarget {
     };
   }
 
-  /** 回读解析后的颜色结果（左上原点、紧凑 RGBA） */
-  readPixels(): Promise<Uint8Array> {
-    return this.device.readTexturePixels(this.texture);
+  /** 回读解析后的颜色结果（左上原点、紧凑 RGBA；`layer` 选择层/面） */
+  readPixels(layer = 0): Promise<Uint8Array> {
+    return this.device.readTexturePixels(this.texture, { layer });
   }
 
   /** 释放附件（可重复调用） */
@@ -152,6 +175,8 @@ export class RenderTarget {
       label: `${this._label}-color`,
       width: this.width,
       height: this.height,
+      dimension: this.dimension,
+      depthOrArrayLayers: this.depthOrArrayLayers,
       format: this.format,
       usage:
         TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC | (this._sampleable ? TextureUsage.TEXTURE_BINDING : 0),
@@ -161,9 +186,13 @@ export class RenderTarget {
           label: `${this._label}-depth`,
           width: this.width,
           height: this.height,
+          // 深度附件跟着分层：cube 颜色目标用 2D 数组深度（WebGPU 不允许 cube 深度纹理）
+          dimension: this.dimension === "2d" ? "2d" : "2d-array",
+          depthOrArrayLayers: this.depthOrArrayLayers,
           format: this._depthFormat,
-          // COPY_SRC：深度回读 / 可视化需要（WebGPU 的 copyTextureToBuffer 要求它）
-          usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC,
+          // COPY_SRC：深度回读 / 可视化需要（WebGPU 的 copyTextureToBuffer 要求它）；
+          // TEXTURE_BINDING：WebGL2 的深度回读要先可视化（采样深度纹理）才能读出浮点值
+          usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC | TextureUsage.TEXTURE_BINDING,
         })
       : null;
     if (this.sampleCount > 1) {
@@ -186,7 +215,6 @@ export class RenderTarget {
         });
       }
     }
-    this._refreshViews();
   }
 
   private _release(): void {
@@ -196,14 +224,21 @@ export class RenderTarget {
     this._msaaDepth?.destroy();
     this._msaaColor = null;
     this._msaaDepth = null;
-    this._colorView = null;
-    this._depthView = null;
-    this._resolveView = null;
+    this._views.clear();
   }
 
-  private _refreshViews(): void {
-    this._colorView = (this._msaaColor ?? this.texture).view();
-    this._depthView = this._msaaDepth ? this._msaaDepth.view() : (this.depth?.view() ?? null);
-    this._resolveView = this._msaaColor ? this.texture.view() : null;
+  /** 某一层的颜色/深度/解析视图（按层缓存；非分层时都退化成整幅视图） */
+  private _layerViews(layer: number): { color: TextureView; depth: TextureView | null; resolve: TextureView | null } {
+    assert(layer >= 0 && layer < this.depthOrArrayLayers, `RenderTarget 层号越界：${layer} >= ${this.depthOrArrayLayers}`);
+    let v = this._views.get(layer);
+    if (!v) {
+      v = {
+        color: (this._msaaColor ?? this.texture).viewLayer(layer),
+        depth: (this._msaaDepth ?? this.depth)?.viewLayer(layer) ?? null,
+        resolve: this._msaaColor ? this.texture.viewLayer(layer) : null,
+      };
+      this._views.set(layer, v);
+    }
+    return v;
   }
 }

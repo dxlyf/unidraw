@@ -13,18 +13,23 @@ export class GLTexture extends Texture {
   readonly glTexture: WebGLTexture;
   readonly gl: GL;
   readonly id: number = nextId();
-  /** 采样数（>1 时用多重采样 renderbuffer 作为附件，本对象只是标识/句柄） */
-  readonly sampleCount: number;
   /** GL 纹理目标（由 dimension 决定：2D / 3D / 2D_ARRAY / CUBE_MAP） */
   private readonly _target: number;
   private readonly _device: WebGL2Device;
+  /**
+   * 是否被当作渲染附件写过（颜色或深度）。
+   *
+   * GL 的行序与「页面上下」相反：光栅化把画面顶部写到最后一行，而 `upload()` 的
+   * 第 0 行落在内存第 0 行。于是回读时**只有渲染出来的纹理需要翻转 Y**
+   * （详见 `WebGL2Device.readTexturePixels` 的说明）。
+   */
+  usedAsAttachment = false;
 
   constructor(device: WebGL2Device, desc: TextureDescriptor) {
     super(desc);
     assert(desc.width >= 1 && desc.height >= 1, "纹理尺寸必须 >=1");
     this._device = device;
     this.gl = device.gl;
-    this.sampleCount = Math.max(1, Math.floor(desc.sampleCount ?? 1));
     this._target =
       this.dimension === "3d"
         ? (device.gl.TEXTURE_3D as number)
@@ -80,6 +85,10 @@ export class GLTexture extends Texture {
 
   protected override createDefaultView(): TextureView {
     return new GLTextureView(this);
+  }
+
+  protected override createLayerView(baseArrayLayer: number, mipLevel: number): TextureView {
+    return new GLTextureView(this, baseArrayLayer, 1, mipLevel);
   }
 
   override upload(data: ArrayBufferView, options: TextureUploadOptions = {}): void {

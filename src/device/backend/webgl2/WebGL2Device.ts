@@ -7,6 +7,7 @@ import { bindGroupLayoutCacheKey } from "../../descriptors.js";
 import type { ColorClearValue } from "../../../gpu/types.js";
 import { vertexFormatInfo, INDEX_FORMAT_BYTES } from "../../../gpu/formats.js";
 import type { IndexFormat, TextureFormat } from "../../../gpu/types.js";
+import { TextureUsage } from "../../../gpu/types.js";
 import type { GL } from "./glUtils.js";
 import { BLEND_FACTORS, BLEND_OPS, COMPARE, INDEX_TYPES, TOPOLOGY_GL } from "./constants.js";
 import { GLBindGroup } from "./resources/GLBindGroup.js";
@@ -16,8 +17,19 @@ import { GLProgram } from "./resources/GLProgram.js";
 import { GLRenderPipeline } from "./resources/GLRenderPipeline.js";
 import { GLSampler } from "./resources/GLSampler.js";
 import { GLTexture } from "./resources/GLTexture.js";
+import { GLTextureView } from "./resources/GLTextureView.js";
 import { attributeGLType, describeRenderer, textureGLParams } from "./glUtils.js";
-import { expandDepthToRgbaFloat, flipRowsInPlace, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
+import { flipRowsInPlace, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions, type ReadRect } from "../../readback.js";
+import { DEPTH_VIS_ARRAY_FS_GLSL, DEPTH_VIS_FS_GLSL, DEPTH_VIS_VS_GLSL } from "./depthVisualize.js";
+
+/** 一个附件点上的「纹理 + 层 + mip」（分层 attachment 用；普通 2D 恒为 0/0） */
+interface GLAttachment {
+  tex: GLTexture;
+  layer: number;
+  mip: number;
+}
+
+const attachmentKey = (a: GLAttachment): string => `${a.tex.id}_${a.layer}_${a.mip}`;
 
 
 // ---------------------------------------------------------------------------
@@ -48,7 +60,13 @@ export class WebGL2Device extends Device {
   private readonly _texFree: number[] = [];
   private _scissorEnabled = false;
   private _limits: DeviceLimits | null = null;
-
+  /** 是否支持把 RGBA16F/RGBA32F 当作颜色附件（构造时即请求，见构造函数注释） */
+  private readonly _extColorBufferFloat: boolean;
+  /** 深度回读用的可视化管线与目标（见 `readDepthPixels`） */
+  private _depthVisProgram: GLProgram | null = null;
+  private _depthVisProgramArray: GLProgram | null = null;
+  private _depthVisTarget: GLTexture | null = null;
+  private _depthVisSize: [number, number] = [0, 0];
   constructor(canvas: HTMLCanvasElement, options: { antialias?: boolean; alpha?: boolean } = {}) {
     const attrs: WebGLContextAttributes = {
       depth: true,
@@ -65,6 +83,12 @@ export class WebGL2Device extends Device {
     super("webgl2", canvas, { kind: "webgl2", name: `WebGL2 · ${describeRenderer(gl)}`, adapter: describeRenderer(gl) });
     this.gl = gl as WebGL2RenderingContext;
     this._textureUnitCursor = 1; // 单元 0 保留给内部操作
+    // 扩展必须在**任何 framebuffer 操作之前**启用：EXT_color_buffer_float 决定了
+    // RGBA16F/RGBA32F 是否可作为颜色附件（可渲染）。若等到 readTexturePixels 里才请求，
+    // 之前的 getFramebuffer 已经按「不可渲染」校验过一遍，会误报 Framebuffer 不完整。
+    this._extColorBufferFloat = gl.getExtension("EXT_color_buffer_float") !== null;
+    // 半浮点渲染 + 浮点线性过滤是 2D/后处理里最常用的两个可选能力，一并提前启用
+    gl.getExtension("OES_texture_float_linear");
   }
 
   override get limits(): DeviceLimits {
@@ -172,63 +196,151 @@ export class WebGL2Device extends Device {
   }
 
   /**
-   * 纹理回读：绑定临时 FBO → `readPixels` → 翻转 Y（GL 原点在左下）。
+   * 纹理回读：绑定临时 FBO → `readPixels` → 按行序翻转 Y。
    * 注意：会临时切换绑定的 framebuffer，读取后恢复。
+   *
+   * **翻转规则（与 WebGPU 对齐的关键）**：
+   * - 被当作渲染附件写过的纹理（`usedAsAttachment`）：GL 把画面顶部写进内存**最后**一行，
+   *   所以要翻转才能得到「左上原点、第一行是画面顶部」的输出 —— WebGPU 无需翻转
+   *   （它的 y=0 就是画面顶部），因此两侧输出一致；
+   * - 只用 `upload()` 写入过的纹理：第 0 行落在内存第 0 行，翻转反而会得到上下颠倒的
+   *   结果（WebGL2 与 WebGPU 的上传行序本来就是一致的），所以**不翻转**。
+   *
+   * 深度纹理不走 `readPixels`（Chrome 的 WebGL2 没实现这条路径，见 `depthVisualize.ts`），
+   * 改为「可视化到 rgba32float 再按颜色回读」。
    */
   override async readTexturePixels(texture: Texture, options: ReadPixelsOptions = {}): Promise<Uint8Array> {
     const gl = this.gl;
     const rect = resolveReadRect(texture, options);
     const tex = texture as GLTexture;
+    if (rect.depth) return this.readDepthPixels(tex, rect);
     const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
-    // 深度纹理要挂**深度附件**（深度格式不是颜色可渲染的）；颜色纹理挂 COLOR_ATTACHMENT0
-    const fb = rect.depth ? this.getFramebuffer(null, tex) : this.getFramebuffer(tex, null);
+    // 分层/分面回读：把 `layer` 指定的那一层挂成颜色附件（cube 是面序号）
+    const fb = this.getFramebuffer({ tex, layer: rect.layer, mip: 0 }, null);
     // GL 的 readPixels 原点在左下：把「左上 y」换算成 GL 的行起点
     const glY = texture.height - (rect.y + rect.height);
-    let out: Uint8Array;
-    if (rect.depth) {
-      // 深度：单通道读回，再铺成 RGBA 浮点（R = 深度）
-      const depth = rect.float ? new Float32Array(rect.width * rect.height) : new Uint32Array(rect.width * rect.height);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      if (rect.float) {
-        gl.readPixels(rect.x, glY, rect.width, rect.height, gl.DEPTH_COMPONENT, gl.FLOAT, depth);
-      } else {
-        gl.readPixels(rect.x, glY, rect.width, rect.height, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, depth);
-      }
-      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
-      if (rect.float) {
-        const flipped = new Float32Array(depth.length);
-        flipRowsInPlace(new Uint8Array(depth.buffer), rect.width, rect.height, 4);
-        flipped.set(depth);
-        const rgba = new Float32Array(rect.width * rect.height * 4);
-        expandDepthToRgbaFloat(flipped, rgba);
-        out = new Uint8Array(rgba.buffer);
-      } else {
-        const rgba = new Float32Array(rect.width * rect.height * 4);
-        const asFloat = new Float32Array(depth.length);
-        for (let i = 0; i < depth.length; i++) asFloat[i] = depth[i]! / 0xffffffff;
-        expandDepthToRgbaFloat(asFloat, rgba);
-        out = new Uint8Array(rgba.buffer);
-      }
-      return out;
-    }
     if (rect.float) {
-      if (this.gl.getExtension("EXT_color_buffer_float") === null) {
+      if (!this._extColorBufferFloat) {
         throw new UnidrawError("[unidraw] 浮点纹理回读需要 WebGL2 的 EXT_color_buffer_float 扩展");
       }
       const rgba = new Float32Array(rect.width * rect.height * 4);
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
       gl.readPixels(rect.x, glY, rect.width, rect.height, gl.RGBA, gl.FLOAT, rgba);
       gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
-      flipRowsInPlace(new Uint8Array(rgba.buffer), rect.width, rect.height, 16);
+      if (tex.usedAsAttachment) flipRowsInPlace(new Uint8Array(rgba.buffer), rect.width, rect.height, 16);
       return new Uint8Array(rgba.buffer);
     }
-    out = new Uint8Array(rect.width * rect.height * 4);
+    const out = new Uint8Array(rect.width * rect.height * 4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.readPixels(rect.x, glY, rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
     gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
-    flipRowsInPlace(out, rect.width, rect.height);
+    if (tex.usedAsAttachment) flipRowsInPlace(out, rect.width, rect.height);
     if (rect.bgra) swizzleBgraToRgbaInPlace(out);
     return out;
+  }
+
+  /**
+   * 深度回读：深度纹理 → （深度可视化 pass）→ rgba32float 颜色纹理 → 普通颜色回读。
+   *
+   * 结果布局与浮点深度回读一致：每纹素 16 字节，R = 深度，GBA = 0/0/1
+   * （着色器直接写成这个布局），行序与颜色回读相同（左上原点，与 WebGPU 一致）。
+   * 需要 `EXT_color_buffer_float`（rgba32float 可渲染）；没有扩展时明确报错，
+   * 而不是静默返回全 0。
+   */
+  private readDepthPixels(tex: GLTexture, rect: ReadRect): Uint8Array {
+    const gl = this.gl;
+    if (!this._extColorBufferFloat) {
+      throw new UnidrawError(
+        "[unidraw] WebGL2 深度回读需要 EXT_color_buffer_float（深度要可视化到 rgba32float 才能读出浮点值）",
+      );
+    }
+    // 可视化着色器按 `sampler2D` / `sampler2DArray` 采样：cube 深度没有对应写法
+    // （ES 3.0 不能对 samplerCube 做 texelFetch），这里明确拒绝而不是给出错误数据。
+    if (tex.dimension === "cube" || tex.dimension === "3d") {
+      throw new UnidrawError(
+        `[unidraw] WebGL2 的深度回读不支持 ${tex.dimension} 深度纹理（支持 2d 与 2d-array）：` +
+          "cube/3D 深度请先各自可视化到颜色目标再回读",
+      );
+    }
+    const layered = tex.dimension === "2d-array";
+    const target = this.depthVisTarget(rect.width, rect.height);
+    const program = this.depthVisProgram(layered);
+    const glProgram = program.linkedProgram();
+    const fb = this.getFramebuffer({ tex: target, layer: 0, mip: 0 }, null);
+
+    // 这次绘制绕过了 executeOps 的状态跟踪，状态要成套存/还原
+    const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
+    const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
+    const prevActive = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
+    const prevTex0 = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null;
+    const prevTex2dArray = gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY) as WebGLTexture | null;
+    const scissorWas = gl.getParameter(gl.SCISSOR_TEST) as boolean;
+    const depthWas = gl.getParameter(gl.DEPTH_TEST) as boolean;
+    const blendWas = gl.getParameter(gl.BLEND) as boolean;
+    const cullWas = gl.getParameter(gl.CULL_FACE) as boolean;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.viewport(0, 0, rect.width, rect.height);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
+    gl.colorMask(true, true, true, true);
+    gl.useProgram(glProgram);
+    gl.bindVertexArray(null); // 顶点由 gl_VertexID 生成，不需要任何属性
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(layered ? gl.TEXTURE_2D_ARRAY : gl.TEXTURE_2D, tex.glTexture);
+    gl.uniform4f(program.uniformLocation("u_rect"), rect.x, rect.y, rect.width, rect.height);
+    gl.uniform1i(program.uniformLocation("u_depth"), 0);
+    if (layered) gl.uniform1i(program.uniformLocation("u_layer"), rect.layer);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const rgba = new Float32Array(rect.width * rect.height * 4);
+    gl.readPixels(0, 0, rect.width, rect.height, gl.RGBA, gl.FLOAT, rgba);
+    // 还原：framebuffer / program / VAO / 纹理单元 / 开关状态
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    gl.useProgram(prevProgram);
+    gl.bindVertexArray(prevVao);
+    gl.activeTexture(prevActive);
+    gl.bindTexture(gl.TEXTURE_2D, prevTex0);
+    if (layered) gl.bindTexture(gl.TEXTURE_2D_ARRAY, prevTex2dArray);
+    if (scissorWas) gl.enable(gl.SCISSOR_TEST);
+    if (depthWas) gl.enable(gl.DEPTH_TEST);
+    if (blendWas) gl.enable(gl.BLEND);
+    if (cullWas) gl.enable(gl.CULL_FACE);
+    this._boundVao = null; // executeOps 会重新 setupVao
+
+    flipRowsInPlace(new Uint8Array(rgba.buffer), rect.width, rect.height, 16);
+    return new Uint8Array(rgba.buffer);
+  }
+
+  /** 深度可视化用的着色器（GLSL，无顶点属性；分层用 sampler2DArray 版本） */
+  private depthVisProgram(layered: boolean): GLProgram {
+    const cached = layered ? this._depthVisProgramArray : this._depthVisProgram;
+    if (cached) return cached;
+    const program = new GLProgram(this, {
+      label: layered ? "depth-visualize-array" : "depth-visualize",
+      glsl: { vertex: DEPTH_VIS_VS_GLSL, fragment: layered ? DEPTH_VIS_ARRAY_FS_GLSL : DEPTH_VIS_FS_GLSL },
+    });
+    if (layered) this._depthVisProgramArray = program;
+    else this._depthVisProgram = program;
+    return program;
+  }
+
+  /** 深度可视化目标（rgba32float，按回读尺寸缓存一张） */
+  private depthVisTarget(width: number, height: number): GLTexture {
+    if (this._depthVisTarget && this._depthVisSize[0] === width && this._depthVisSize[1] === height) return this._depthVisTarget;
+    this._depthVisTarget?.destroy();
+    const target = this.createTexture({
+      label: "depth-visualize",
+      width,
+      height,
+      format: "rgba32float",
+      usage: TextureUsage.RENDER_ATTACHMENT,
+    }) as GLTexture;
+    this._depthVisTarget = target;
+    this._depthVisSize = [width, height];
+    return target;
   }
 
   // -------------------------------------------------------------------------
@@ -262,13 +374,22 @@ export class WebGL2Device extends Device {
         case "beginRenderPass": {
           assert(!inPass, "beginRenderPass 嵌套非法");
           const colorAtt = op.colorAttachments[0];
-          const colorTex = colorAtt?.view?.texture as GLTexture | undefined;
+          const colorView = colorAtt?.view as GLTextureView | null | undefined;
+          const colorTex = colorView?.texture as GLTexture | undefined;
           // 没有任何颜色附件（`colorAttachments: []`）= 只写深度的 pass（阴影贴图）
           const depthOnly = op.colorAttachments.length === 0;
           const toCanvas = !depthOnly && (colorAtt === null || colorAtt?.view === null);
           const depthAtt = op.depthStencilAttachment;
-          const depthTex = depthAtt?.view?.texture as GLTexture | undefined;
+          const depthView = depthAtt?.view as GLTextureView | null | undefined;
+          const depthTex = depthView?.texture as GLTexture | undefined;
           const scissorWas = this._scissorEnabled;
+          // 分层 attachment：视图带层号时只挂那一层（cube 是面序号）
+          const colorAspect: GLAttachment | null = colorTex
+            ? { tex: colorTex, layer: colorView?.baseArrayLayer ?? 0, mip: colorView?.mipLevel ?? 0 }
+            : null;
+          const depthAspect: GLAttachment | null = depthTex
+            ? { tex: depthTex, layer: depthView?.baseArrayLayer ?? 0, mip: depthView?.mipLevel ?? 0 }
+            : null;
 
           if (toCanvas) {
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -276,12 +397,21 @@ export class WebGL2Device extends Device {
             targetHeight = this.canvas?.height ?? 0;
           } else {
             const msaa = (colorTex?.sampleCount ?? 1) > 1 || (depthTex?.sampleCount ?? 1) > 1;
+            if (msaa) {
+              // MSAA 附件走 renderbuffer，只有整层可用：分层 + 多重采样在 GL 里做不到
+              if ((colorAspect && colorAspect.layer !== 0) || (depthAspect && depthAspect.layer !== 0)) {
+                assert(false, "WebGL2 不支持分层的多重采样附件：分层渲染目标请用 sampleCount: 1");
+              }
+            }
             const fb = msaa
               ? this.getMsaaFramebuffer(colorTex ?? null, depthTex ?? null)
-              : this.getFramebuffer(colorTex ?? null, depthTex ?? null);
+              : this.getFramebuffer(colorAspect, depthAspect);
             gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
             msaaSourceFb = msaa ? fb : null;
             msaaResolveTarget = msaa ? (colorAtt?.resolveTo?.texture ?? null) : null;
+            // MSAA 目标本身是 renderbuffer 的「标识纹理」，真正拿到渲染结果的是 resolve
+            // 目标（blit 复制行序不变），所以它同样要标记成「渲染过的纹理」。
+            if (msaaResolveTarget) (msaaResolveTarget as GLTexture).usedAsAttachment = true;
             const count = op.colorAttachments.filter((a) => a !== null).length;
             if (count === 0) {
               // 深度专用 FBO：不能引用不存在的颜色附件
@@ -294,6 +424,10 @@ export class WebGL2Device extends Device {
             }
             targetWidth = colorTex?.width ?? depthTex?.width ?? 0;
             targetHeight = colorTex?.height ?? depthTex?.height ?? 0;
+            // 「被当作渲染附件写过」的纹理在内存里是 GL 行序（第 0 行 = 画面下方），
+            // 回读时要翻转；只用 upload() 写入过的纹理则保持上传行序。见 readTexturePixels。
+            if (colorTex) colorTex.usedAsAttachment = true;
+            if (depthTex) depthTex.usedAsAttachment = true;
           }
           passHeight = targetHeight;
 
@@ -614,19 +748,43 @@ export class WebGL2Device extends Device {
     this._boundVao = null; // setupVao 结尾解绑，保持状态跟踪一致
   }
 
-  private getFramebuffer(color: GLTexture | null, depth: GLTexture | null): WebGLFramebuffer {
+  /**
+   * 把一张纹理的某一层挂到附件点上。
+   *
+   * 三种挂法不能混：cube 只能用**面目标**（`TEXTURE_CUBE_MAP_POSITIVE_X + layer`，
+   * `framebufferTextureLayer` 对 cube 无效、FBO 会不完整）；2D 数组/3D 用
+   * `framebufferTextureLayer`；普通 2D 用 `framebufferTexture2D`。
+   */
+  private attachTexture(attachment: number, a: GLAttachment): void {
     const gl = this.gl;
-    const key = `c${color ? color.id : 0}d${depth ? depth.id : 0}`;
+    const t = a.tex;
+    if (t.dimension === "cube") {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, attachment, gl.TEXTURE_CUBE_MAP_POSITIVE_X + a.layer, t.glTexture, a.mip);
+    } else if (t.dimension === "3d" || t.dimension === "2d-array") {
+      gl.framebufferTextureLayer(gl.FRAMEBUFFER, attachment, t.glTexture, a.mip, a.layer);
+    } else {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, attachment, gl.TEXTURE_2D, t.glTexture, a.mip);
+    }
+  }
+
+  private getFramebuffer(color: GLAttachment | null, depth: GLAttachment | null): WebGLFramebuffer {
+    const gl = this.gl;
+    const key = `c${color ? attachmentKey(color) : "0"}d${depth ? attachmentKey(depth) : "0"}`;
     const cached = this._fbos.get(key);
     if (cached) return cached;
     const fb = gl.createFramebuffer();
     assert(fb, "createFramebuffer 失败");
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-    if (color) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color.glTexture, 0);
-    if (depth) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depth.glTexture, 0);
+    if (color) this.attachTexture(gl.COLOR_ATTACHMENT0, color);
+    if (depth) this.attachTexture(gl.DEPTH_ATTACHMENT, depth);
     // 只有深度附件时必须把 draw buffer 关掉（默认指向不存在的 COLOR_ATTACHMENT0 →
     // FRAMEBUFFER_INCOMPLETE_ATTACHMENT）。深度回读、深度可视化都会走这条路径。
-    if (!color) gl.drawBuffers([gl.NONE]);
+    if (!color) {
+      gl.drawBuffers([gl.NONE]);
+      // read buffer 同样要关：readPixels 读 DEPTH_COMPONENT 时若 read buffer 不是 NONE，
+      // WebGL2 直接报 INVALID_OPERATION（缓冲全 0，且不会抛异常，很容易误判成「深度值不对」）。
+      gl.readBuffer(gl.NONE);
+    }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
     assert(status === gl.FRAMEBUFFER_COMPLETE, `Framebuffer 不完整：0x${status.toString(16)}`);
     this._fbos.set(key, fb);
@@ -668,7 +826,7 @@ export class WebGL2Device extends Device {
       this._renderbuffers.delete(rbKey);
     }
     for (const [key, fb] of this._fbos) {
-      const m = /c(\d+)d(\d+)/.exec(key);
+      const m = /c(\d+)_\d+_\d+d(\d+)_\d+_\d+/.exec(key);
       if (m && (Number(m[1]) === textureId || Number(m[2]) === textureId)) {
         gl.deleteFramebuffer(fb);
         this._fbos.delete(key);
@@ -679,7 +837,7 @@ export class WebGL2Device extends Device {
   /** MSAA framebuffer：颜色/深度都用多重采样 renderbuffer；解析目标在 pass 结束时 blit。 */
   private getMsaaFramebuffer(color: GLTexture | null, depth: GLTexture | null): WebGLFramebuffer {
     const gl = this.gl;
-    const key = `msaa:c${color ? color.id : 0}d${depth ? depth.id : 0}s${color?.sampleCount ?? depth?.sampleCount ?? 1}`;
+    const key = `msaa:c${color ? color.id : 0}_0_0d${depth ? depth.id : 0}_0_0s${color?.sampleCount ?? depth?.sampleCount ?? 1}`;
     const cached = this._fbos.get(key);
     if (cached) return cached;
     const fb = gl.createFramebuffer();
@@ -698,7 +856,8 @@ export class WebGL2Device extends Device {
   private resolveMsaa(source: WebGLFramebuffer, target: Texture): void {
     const gl = this.gl;
     const tex = target as GLTexture;
-    const dst = this.getFramebuffer(tex, null);
+    // 解析目标一定是单层 2D 纹理（MSAA 分层组合在 GL 里不存在，见 beginRenderPass）
+    const dst = this.getFramebuffer({ tex, layer: 0, mip: 0 }, null);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, source);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst);
     gl.blitFramebuffer(

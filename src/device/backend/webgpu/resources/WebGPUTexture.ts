@@ -39,6 +39,10 @@ export class WebGPUTexture extends Texture {
     return new WebGPUTextureView(this);
   }
 
+  protected override createLayerView(baseArrayLayer: number, mipLevel: number): TextureView {
+    return new WebGPUTextureView(this, baseArrayLayer, 1, mipLevel);
+  }
+
   override upload(data: ArrayBufferView, options: TextureUploadOptions = {}): void {
     const info = textureFormatInfo(this.format);
     const x = options.x ?? 0;
