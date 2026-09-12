@@ -8,6 +8,11 @@ import { clamp } from "./mmath.js";
  * `Mat4.identity().translate(1,0,0).rotateY(rad).scale(2,2,2)`
  * 等价于 M = T * R * S（先缩放、再旋转、最后平移）。
  */
+import type { Vec3 } from "./vec3.js";
+import type { Quaternion } from "./Quaternion.js";
+
+/** decompose 用的模块级临时量（惰性创建：类声明前不能 new Mat4，否则 TDZ） */
+let _decomposeScratch: Mat4 | null = null;
 export class Mat4 {
   readonly elements: Float32Array;
 
@@ -395,6 +400,96 @@ export class Mat4 {
     out.set(this.elements, byteOffset / 4);
   }
 
+  /**
+   * 由四元数**构造**旋转矩阵（覆盖平移/缩放；元素按列主序写入，
+   * 即 `m[row][col] = elements[col*4 + row]`）。
+   */
+  makeRotationFromQuaternion(q: Quaternion): this {
+    const e = this.elements;
+    const x = q.x, y = q.y, z = q.z, w = q.w;
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+    e[0] = 1 - (yy + zz); e[4] = xy - wz; e[8] = xz + wy;
+    e[1] = xy + wz; e[5] = 1 - (xx + zz); e[9] = yz - wx;
+    e[2] = xz - wy; e[6] = yz + wx; e[10] = 1 - (xx + yy);
+    e[3] = 0; e[7] = 0; e[11] = 0;
+    e[12] = 0; e[13] = 0; e[14] = 0; e[15] = 1;
+    return this;
+  }
+
+  /** 位置 + 旋转 + 缩放 → TRS 矩阵（与 `decompose` 互为逆运算） */
+  compose(position: Vec3, quaternion: Quaternion, scale: Vec3): this {
+    this.makeRotationFromQuaternion(quaternion);
+    const e = this.elements;
+    const sx = scale.x, sy = scale.y, sz = scale.z;
+    e[0] *= sx; e[1] *= sx; e[2] *= sx;
+    e[4] *= sy; e[5] *= sy; e[6] *= sy;
+    e[8] *= sz; e[9] *= sz; e[10] *= sz;
+    e[12] = position.x; e[13] = position.y; e[14] = position.z;
+    return this;
+  }
+
+  /**
+   * 分解 TRS。缩放取三列长度（行列式为负说明含镜像，X 取负），
+   * 再把 3×3 归一化后交给四元数求解 —— 与 three.js 同款做法。
+   */
+  decompose(position: Vec3, quaternion: Quaternion, scale: Vec3): this {
+    const e = this.elements;
+    let sx = Math.hypot(e[0]!, e[1]!, e[2]!);
+    const sy = Math.hypot(e[4]!, e[5]!, e[6]!);
+    const sz = Math.hypot(e[8]!, e[9]!, e[10]!);
+    if (this.determinant() < 0) sx = -sx;
+    position.set(e[12]!, e[13]!, e[14]!);
+    const scratch = (_decomposeScratch ??= new Mat4());
+    scratch.copy(this);
+    const invSX = sx !== 0 ? 1 / sx : 0;
+    const invSY = sy !== 0 ? 1 / sy : 0;
+    const invSZ = sz !== 0 ? 1 / sz : 0;
+    const me = scratch.elements;
+    me[0] *= invSX; me[1] *= invSX; me[2] *= invSX;
+    me[4] *= invSY; me[5] *= invSY; me[6] *= invSY;
+    me[8] *= invSZ; me[9] *= invSZ; me[10] *= invSZ;
+    me[12] = 0; me[13] = 0; me[14] = 0;
+    quaternion.setFromRotationMatrix(scratch);
+    scale.set(sx, sy, sz);
+    return this;
+  }
+
+  /** 直接写平移分量（列主序：第 12/13/14 个元素） */
+  setPosition(x: number, y: number, z: number): this {
+    const e = this.elements;
+    e[12] = x; e[13] = y; e[14] = z;
+    return this;
+  }
+
+  /** 转置（原地） */
+  transpose(): this {
+    const e = this.elements;
+    let tmp = e[1]!; e[1] = e[4]!; e[4] = tmp;
+    tmp = e[2]!; e[2] = e[8]!; e[8] = tmp;
+    tmp = e[6]!; e[6] = e[9]!; e[9] = tmp;
+    tmp = e[3]!; e[3] = e[12]!; e[12] = tmp;
+    tmp = e[7]!; e[7] = e[13]!; e[13] = tmp;
+    tmp = e[11]!; e[11] = e[14]!; e[14] = tmp;
+    return this;
+  }
+
+  /** 只保留 `m` 的旋转部分（各列归一化，去掉缩放） */
+  extractRotation(m: Mat4): this {
+    const me = m.elements;
+    const e = this.elements;
+    let inv = 1 / (Math.hypot(me[0]!, me[1]!, me[2]!) || 1);
+    e[0] = me[0]! * inv; e[1] = me[1]! * inv; e[2] = me[2]! * inv;
+    inv = 1 / (Math.hypot(me[4]!, me[5]!, me[6]!) || 1);
+    e[4] = me[4]! * inv; e[5] = me[5]! * inv; e[6] = me[6]! * inv;
+    inv = 1 / (Math.hypot(me[8]!, me[9]!, me[10]!) || 1);
+    e[8] = me[8]! * inv; e[9] = me[9]! * inv; e[10] = me[10]! * inv;
+    e[3] = 0; e[7] = 0; e[11] = 0;
+    e[12] = 0; e[13] = 0; e[14] = 0; e[15] = 1;
+    return this;
+  }
   equals(other: Mat4, epsilon = 1e-6): boolean {
     const a = this.elements;
     const b = other.elements;

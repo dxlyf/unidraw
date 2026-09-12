@@ -37,6 +37,28 @@
 纯 TypeScript、零依赖。`Mat4` 为列主序（与着色器一致），方法就地修改并返回
 `this` 以便链式：`Mat4.identity().translate(...).rotateY(...).scale(...)`。
 
+**几何/旋转类型都放在这里**（与 three.js 的 `math` 模块对应），`src/index.ts`
+统一导出：
+
+| 类别 | 类型 |
+| --- | --- |
+| 向量/矩阵/颜色 | `Vec2` / `Vec3` / `Vec4` / `Mat4` / `Color` |
+| 旋转与姿态 | `Euler`（六种 order）、`Quaternion`（含 `slerp` / `setFromUnitVectors`） |
+| 几何图元 | `Plane` / `Box2` / `Box3` / `Sphere` / `Line3` / `Triangle` |
+| 坐标表示 | `Cylindrical` / `Spherical`（phi 从 +Y 量起，与 three.js 逐位一致） |
+| 视锥与射线 | `Frustum` / `Ray` / `Raycaster` |
+
+- 旋转表示之间是**闭合**的：`Euler ↔ Quaternion ↔ Mat4` 往返都有单测守着
+  （`src/__tests__/math3d.test.ts`）；
+- `Vec3` 侧提供 `applyQuaternion` / `applyEuler` / `applyMatrix4` / `transformDirection`
+  / `setFromSpherical(Coords)` / `setFromCylindrical(Coords)`；
+  `Mat4` 侧提供 `makeRotationFromQuaternion` / `compose` / `decompose`（互为逆）；
+- **`Ray` / `Raycaster` 原先在 `interaction/`、`Frustum` 原先在 `scene/`**，现已迁到
+  `math/`；旧路径保留 re-export（`export * from "../math/..."`），既有导入不受影响。
+  注意 `Raycaster` 需要 `instanceof Mesh`，因此 `math/Raycaster.ts` 会 import 渲染层
+  —— 这是刻意的例外（three.js 的 Raycaster 同样依赖 Object3D），其余 `math/` 文件
+  对渲染层只有 `import type` 依赖。
+
 ### 统一类型 `gpu/types.ts`
 枚举常量与字符串联合同时被三种后端消费，例如：
 

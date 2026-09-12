@@ -416,7 +416,8 @@ frame();
 
 ```
 src/
-  math/        vec2/3/4、Color、Mat4、工具
+  math/        vec2/3/4、Color、Mat4、Euler/Quaternion、Plane/Box2/Box3/Sphere/Line3/
+               Triangle、Cylindrical/Spherical、Frustum、Ray/Raycaster、工具
   gpu/         types（统一枚举）、formats（顶点/纹理格式表）、std140 布局引擎
   device/      Device 抽象、descriptors、createDevice 工厂
     resource/  一个类一个文件（ResourceBase/Buffer/Texture/TextureView/Sampler/
