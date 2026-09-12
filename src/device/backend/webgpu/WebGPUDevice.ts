@@ -19,7 +19,7 @@ import { WebGPUSampler } from "./resources/WebGPUSampler.js";
 import { WebGPUTexture } from "./resources/WebGPUTexture.js";
 import { WebGPUTextureView } from "./resources/WebGPUTextureView.js";
 import { adapterName, colorAttachmentState } from "./gpuUtils.js";
-import { repackRows, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
+import { expandDepthToRgbaFloat, repackRows, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
 
 /** WebGPU `copyTextureToBuffer` 要求 bytesPerRow 为 256 的倍数。 */
 function align256(value: number): number {
@@ -147,7 +147,8 @@ export class WebGPUDevice extends Device {
     const rect = resolveReadRect(texture, options);
     assert((texture.usage & TextureUsage.COPY_SRC) !== 0, "readTexturePixels 需要纹理带 COPY_SRC 用途");
     const tex = texture as WebGPUTexture;
-    const tight = rect.width * 4;
+    const bpt = rect.bytesPerTexel;
+    const tight = rect.width * bpt;
     const bytesPerRow = align256(tight);
     const buffer = this.gpu.createBuffer({
       label: "unidraw-readback",
@@ -158,18 +159,25 @@ export class WebGPUDevice extends Device {
     encoder.copyTextureToBuffer(
       { texture: tex.gpuTexture, origin: { x: rect.x, y: rect.y } },
       { buffer, bytesPerRow, rowsPerImage: rect.height },
-      { width: rect.width, height: rect.height },
+      { width: rect.width, height: rect.height, depthOrArrayLayers: 1 },
     );
     this.gpu.queue.submit([encoder.finish()]);
     this.markSubmitted();
 
     await buffer.mapAsync(GPUMapMode.READ);
     const src = new Uint8Array(buffer.getMappedRange());
-    const out = new Uint8Array(tight * rect.height);
-    repackRows(src, bytesPerRow, rect.width, rect.height, out);
+    const tiers = new Uint8Array(tight * rect.height);
+    repackRows(src, bytesPerRow, rect.width, rect.height, tiers, bpt);
     buffer.unmap();
     buffer.destroy();
-    if (rect.bgra) swizzleBgraToRgbaInPlace(out);
+    // 深度：单通道浮点铺成 RGBA 浮点（R = 深度），与 WebGL2 后端保持一致
+    if (rect.depth) {
+      const rgba = new Float32Array(rect.width * rect.height * 4);
+      expandDepthToRgbaFloat(new Float32Array(tiers.buffer, tiers.byteOffset, rect.width * rect.height), rgba);
+      return new Uint8Array(rgba.buffer);
+    }
+    if (rect.bgra) swizzleBgraToRgbaInPlace(tiers);
+    const out = tiers;
     return out;
   }
 

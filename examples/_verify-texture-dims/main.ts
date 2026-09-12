@@ -13,6 +13,7 @@
  */
 
 import { createDevice } from "../../src/device/createDevice.js";
+import { RenderTarget } from "../../src/render/RenderTarget.js";
 import { TextureUsage } from "../../src/gpu/types.js";
 import type { Device } from "../../src/device/Device.js";
 import type { Texture } from "../../src/device/resources.js";
@@ -127,6 +128,59 @@ async function main(): Promise<void> {
     cubeReads,
     dims: [array.dimension, array.depthOrArrayLayers, vol.dimension, vol.depthOrArrayLayers, cube.dimension, cube.depthOrArrayLayers],
   };
+  (globalThis as Record<string, unknown>).__texdims = result;
+  // 4) 浮点回读：rgba32float 上传 → 以 float32 回读
+  const ftex = device.createTexture({
+    label: "verify-float",
+    width: 2,
+    height: 2,
+    format: "rgba32float",
+    usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
+  });
+  const fsrc = new Float32Array([1.5, 0.25, -2, 1, 0.5, 0.125, 3, 1, 4, 8, 16, 1, 0.0625, 1, 1, 1]);
+  ftex.upload(fsrc);
+  let fdata: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  let floatErr = "";
+  try {
+    fdata = new Float32Array((await device.readTexturePixels(ftex, { type: "float32" })).buffer);
+  } catch (e) {
+    floatErr = e instanceof Error ? e.message : String(e);
+  }
+  const floatOk = Math.abs(fdata[0]! - 1.5) < 1e-5 && Math.abs(fdata[6]! - 3) < 1e-5 && Math.abs(fdata[12]! - 0.0625) < 1e-6;
+
+  // 5) 深度回读：深度目标清成 0.5 再读回（用深度专用 pass：colorAttachments 为空）
+  const depthTarget = new RenderTarget(device, {
+    label: "verify-depth",
+    width: 2,
+    height: 2,
+    depth: "depth32float",
+    sampleCount: 1,
+  });
+  const denc = device.createCommandEncoder("verify-depth");
+  const dpass = denc.beginRenderPass({
+    label: "verify-depth",
+    colorAttachments: [],
+    depthStencilAttachment: depthTarget.depthAttachment({ depthClearValue: 0.5 }),
+  });
+  dpass.end();
+  device.submit([denc.finish()]);
+  const depthTex = depthTarget.depth;
+  let ddata: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  let depthErr = "";
+  try {
+    ddata = depthTex ? new Float32Array((await device.readTexturePixels(depthTex, { type: "float32" })).buffer) : new Float32Array(0);
+  } catch (e) {
+    depthErr = e instanceof Error ? e.message : String(e);
+  }
+  const depthOk = ddata.length > 0 && Math.abs(ddata[0]! - 0.5) < 0.01;
+
+  (result as Record<string, unknown>).floatOk = floatOk;
+  (result as Record<string, unknown>).depthOk = depthOk;
+  (result as Record<string, unknown>).floatSample = [fdata[0], fdata[6], fdata[12]];
+  (result as Record<string, unknown>).depthSample = ddata[0];
+  (result as Record<string, unknown>).floatErr = floatErr;
+  (result as Record<string, unknown>).depthErr = depthErr;
+  // 全局要在**补齐 float/depth 字段之后**再写一次，探针读的是这里
   (globalThis as Record<string, unknown>).__texdims = result;
   console.log("TEXDIMS_SELFTEST " + JSON.stringify(result));
 }

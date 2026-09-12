@@ -162,7 +162,8 @@ export class RenderTarget {
           width: this.width,
           height: this.height,
           format: this._depthFormat,
-          usage: TextureUsage.RENDER_ATTACHMENT,
+          // COPY_SRC：深度回读 / 可视化需要（WebGPU 的 copyTextureToBuffer 要求它）
+          usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC,
         })
       : null;
     if (this.sampleCount > 1) {

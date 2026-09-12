@@ -17,7 +17,7 @@ import { GLRenderPipeline } from "./resources/GLRenderPipeline.js";
 import { GLSampler } from "./resources/GLSampler.js";
 import { GLTexture } from "./resources/GLTexture.js";
 import { attributeGLType, describeRenderer, textureGLParams } from "./glUtils.js";
-import { flipRowsInPlace, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
+import { expandDepthToRgbaFloat, flipRowsInPlace, resolveReadRect, swizzleBgraToRgbaInPlace, type ReadPixelsOptions } from "../../readback.js";
 
 
 // ---------------------------------------------------------------------------
@@ -180,11 +180,51 @@ export class WebGL2Device extends Device {
     const rect = resolveReadRect(texture, options);
     const tex = texture as GLTexture;
     const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
-    const fb = this.getFramebuffer(tex, null);
-    const out = new Uint8Array(rect.width * rect.height * 4);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    // 深度纹理要挂**深度附件**（深度格式不是颜色可渲染的）；颜色纹理挂 COLOR_ATTACHMENT0
+    const fb = rect.depth ? this.getFramebuffer(null, tex) : this.getFramebuffer(tex, null);
     // GL 的 readPixels 原点在左下：把「左上 y」换算成 GL 的行起点
-    gl.readPixels(rect.x, texture.height - (rect.y + rect.height), rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    const glY = texture.height - (rect.y + rect.height);
+    let out: Uint8Array;
+    if (rect.depth) {
+      // 深度：单通道读回，再铺成 RGBA 浮点（R = 深度）
+      const depth = rect.float ? new Float32Array(rect.width * rect.height) : new Uint32Array(rect.width * rect.height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      if (rect.float) {
+        gl.readPixels(rect.x, glY, rect.width, rect.height, gl.DEPTH_COMPONENT, gl.FLOAT, depth);
+      } else {
+        gl.readPixels(rect.x, glY, rect.width, rect.height, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, depth);
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+      if (rect.float) {
+        const flipped = new Float32Array(depth.length);
+        flipRowsInPlace(new Uint8Array(depth.buffer), rect.width, rect.height, 4);
+        flipped.set(depth);
+        const rgba = new Float32Array(rect.width * rect.height * 4);
+        expandDepthToRgbaFloat(flipped, rgba);
+        out = new Uint8Array(rgba.buffer);
+      } else {
+        const rgba = new Float32Array(rect.width * rect.height * 4);
+        const asFloat = new Float32Array(depth.length);
+        for (let i = 0; i < depth.length; i++) asFloat[i] = depth[i]! / 0xffffffff;
+        expandDepthToRgbaFloat(asFloat, rgba);
+        out = new Uint8Array(rgba.buffer);
+      }
+      return out;
+    }
+    if (rect.float) {
+      if (this.gl.getExtension("EXT_color_buffer_float") === null) {
+        throw new UnidrawError("[unidraw] 浮点纹理回读需要 WebGL2 的 EXT_color_buffer_float 扩展");
+      }
+      const rgba = new Float32Array(rect.width * rect.height * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.readPixels(rect.x, glY, rect.width, rect.height, gl.RGBA, gl.FLOAT, rgba);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+      flipRowsInPlace(new Uint8Array(rgba.buffer), rect.width, rect.height, 16);
+      return new Uint8Array(rgba.buffer);
+    }
+    out = new Uint8Array(rect.width * rect.height * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.readPixels(rect.x, glY, rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
     gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
     flipRowsInPlace(out, rect.width, rect.height);
     if (rect.bgra) swizzleBgraToRgbaInPlace(out);
@@ -584,6 +624,9 @@ export class WebGL2Device extends Device {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     if (color) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color.glTexture, 0);
     if (depth) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depth.glTexture, 0);
+    // 只有深度附件时必须把 draw buffer 关掉（默认指向不存在的 COLOR_ATTACHMENT0 →
+    // FRAMEBUFFER_INCOMPLETE_ATTACHMENT）。深度回读、深度可视化都会走这条路径。
+    if (!color) gl.drawBuffers([gl.NONE]);
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
     assert(status === gl.FRAMEBUFFER_COMPLETE, `Framebuffer 不完整：0x${status.toString(16)}`);
     this._fbos.set(key, fb);
