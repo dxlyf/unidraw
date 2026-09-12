@@ -783,9 +783,18 @@ export class Canvas2D {
     // 调用方的 pass 附件（同一个 pass 里不能既当附件又当采样源）。所以这一帧整体改成
     // 「先画进自己的图层，最后再呈现到调用方 pass」；只有真的用到这些模式才切，普通帧
     // 的路径完全不变（也保证 Canvas2D 叠在 3D 场景上时照旧直接画进去）。
-    const needsLayer = this.ops.some((op) => op.shadow === undefined && dstTextureBlendIndex(op.comp) >= 0);
     let layerFront: RenderTarget | null = null;
     let layerBack: RenderTarget | null = null;
+    let lastBlendOp = -1;
+    for (let i = 0; i < this.ops.length; i++) {
+      const o = this.ops[i]!;
+      if (o.shadow === undefined && dstTextureBlendIndex(o.comp) >= 0) lastBlendOp = i;
+    }
+    const needsLayer = lastBlendOp >= 0;
+    // 图层模式在「本帧最后一次混合 op」之后就可以收摊：把图层呈现进调用方 pass，后面的
+    // op 直接画进调用方 pass —— 省掉整整一趟全屏 MSAA 写 + 解析（图层里再画一遍再呈现）。
+    let layerActive = needsLayer;
+    let layerPresented = false;
     if (needsLayer) {
       const lw = Math.max(1, this.viewW);
       const lh = Math.max(1, this.viewH);
@@ -817,7 +826,7 @@ export class Canvas2D {
     let layerEnc: CommandEncoder | null = null;
     let layerStarted = false;
     const openLayer = (): RenderPassEncoder | null => {
-      if (!needsLayer || !layerFront) return null;
+      if (!layerActive || !layerFront) return null;
       if (layerSink) return layerSink;
       layerEnc = this.device.createCommandEncoder("2d-layer");
       layerSink = layerEnc.beginRenderPass({
@@ -844,7 +853,8 @@ export class Canvas2D {
       layerEnc = null;
     };
 
-    for (const op of this.ops) {
+    for (let opIndex = 0; opIndex < this.ops.length; opIndex++) {
+      const op = this.ops[opIndex]!;
       if (op.shadow !== undefined) {
         // 合成位置 = **该组第一个 op 之前**：早于它会被本帧先画的背景 op 盖掉，
         // 晚于它就会盖住本体。合成会改掉 pass 的管线/绑定，所以缓存全部作废。
@@ -894,6 +904,20 @@ export class Canvas2D {
         const swap = layerFront;
         layerFront = layerBack;
         layerBack = swap;
+
+        // 本帧最后一次混合 op：立刻把图层呈现进调用方 pass，后面的 op 直接画进去 ——
+        // 省掉「再开一层图层把后续 op 画一遍、最后再呈现」那一整趟全屏 MSAA 写 + 解析。
+        if (opIndex === lastBlendOp && !layerPresented) {
+          layerPresented = true;
+          layerActive = false;
+          const present = this.ensureLayerPresentPass(this.layerFormat(), samples);
+          pass.setScissorRect(0, 0, lw, lh);
+          present.drawLayer(pass, layerFront.texture, lw, lh, this.layerFlipY());
+          lastPipeKey = null;
+          lastTex = null;
+          lastSampler = null;
+          clipInit = false;
+        }
         continue;
       }
 
@@ -936,7 +960,7 @@ export class Canvas2D {
     }
 
     // 图层模式收尾：把图层呈现到调用方 pass（预乘 over，透明处保留调用方原有内容）
-    if (needsLayer && layerFront) {
+    if (needsLayer && layerFront && !layerPresented) {
       const lw = Math.max(1, this.viewW);
       const lh = Math.max(1, this.viewH);
       closeLayer();
