@@ -20,6 +20,7 @@ import type { Device } from "../../device/Device.js";
 import type { BindGroup, BindGroupLayout, Program, RenderPipeline, Sampler, Texture } from "../../device/resources.js";
 import type { CommandEncoder, RenderPassEncoder } from "../../command/encoder.js";
 import type { TextureFormat } from "../../gpu/types.js";
+import type { BlendStateDescriptor } from "../../device/descriptors.js";
 import { TextureUsage } from "../../gpu/types.js";
 import { UniformBlock } from "../UniformBlock.js";
 import { textureFormatInfo } from "../../gpu/formats.js";
@@ -93,8 +94,11 @@ export interface FullScreenPassOptions {
   /**
    * 输出是否带 **source-over 混合**（默认 false = 直接覆盖，后处理链用不上混合）。
    * render2d 的阴影合成需要它：输出的是「直通 alpha」的颜色，必须与目标做 over。
+   *
+   * 也可以直接给一个完整的 `BlendStateDescriptor`（例如图层合成要用的**预乘** over：
+   * 图层的 rgb 已经是预乘的，再用直通因子会把 alpha 乘两次）。
    */
-  blend?: boolean;
+  blend?: boolean | BlendStateDescriptor;
   /**
    * 输出附件的采样数（默认 1）。
    *
@@ -169,7 +173,12 @@ export class FullScreenPass implements PostEffect {
       primitive: { topology: "triangle-list", cullMode: "none", frontFace: "ccw" },
       multisample: { count: Math.max(1, Math.floor(options.sampleCount ?? 1)) },
       depthStencil: null,
-      targets: [{ format: targetFormat, ...(options.blend ? { blend: OVER_BLEND } : {}) }],
+      targets: [
+        {
+          format: targetFormat,
+          ...(options.blend ? { blend: options.blend === true ? OVER_BLEND : options.blend } : {}),
+        },
+      ],
     });
   }
 

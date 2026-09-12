@@ -15,6 +15,7 @@ import type { Device } from "../../device/Device.js";
 import type { RenderPassEncoder } from "../../command/encoder.js";
 import type { Texture } from "../../device/resources.js";
 import type { TextureFormat } from "../../gpu/types.js";
+import type { BlendStateDescriptor } from "../../device/descriptors.js";
 
 export interface CopyPassOptions {
   /**
@@ -30,13 +31,28 @@ export interface CopyPassOptions {
    * 场景才会暴露。
    */
   flipY?: boolean;
+  /** 输出附件的采样数（默认 1）；画进调用方开了 MSAA 的 pass 时必须给对 */
+  sampleCount?: number;
+  /**
+   * 输出混合状态（默认不混合 = 直接覆盖）。
+   *
+   * render2d 的图层呈现要用**预乘 over**：图层 rgb 本身已经是预乘的，套「直通 over」
+   * 会把 alpha 乘两次。
+   */
+  blend?: BlendStateDescriptor;
 }
 
 export class CopyPass extends FullScreenPass {
   private readonly _flipY: boolean;
 
   constructor(device: Device, targetFormat?: TextureFormat, options: CopyPassOptions = {}) {
-    super(device, { name: "copy", fragment: { glsl: COPY_GLSL, wgsl: COPY_WGSL }, targetFormat });
+    super(device, {
+      name: "copy",
+      fragment: { glsl: COPY_GLSL, wgsl: COPY_WGSL },
+      targetFormat,
+      sampleCount: options.sampleCount,
+      blend: options.blend,
+    });
     this._flipY = options.flipY === true;
   }
 

@@ -29,7 +29,7 @@
 | 离屏与后处理 | `RenderTarget`（格式/深度/**MSAA**/回读，三后端统一）+ `EffectComposer` 效果链（场景目标可选 MSAA → ping-pong 效果 → 呈现）；内置 `CopyPass`/`ToneMapPass`(ACES 等 4 种)/`BloomPass`/`VignettePass`/`GrayscalePass`/`ShaderPass`，自定义效果只要一对 fragment 源码 |
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
-| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / 实例化 / 资源缓存 / App·插件（`node --test`，129 个用例） |
+| 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / 实例化 / 资源缓存 / App·插件（`node --test`，160 个用例） |
 | 示例 | 19 个可运行示例（同一源码切 WebGL2 / WebGPU），全部带 **lil-gui 参数面板**：**示例游戏《坦克世界》**、**2D 绘制**、**3D 材质与几何画廊**、**PBR 材质（StandardMaterial 矩阵）**、**混合模式**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）、`lil-gui`（示例的参数面板）。
@@ -99,7 +99,7 @@ gui.add(state, "strength", 0, 3, 0.01).name("强度").onChange(apply);
 ```bash
 npm install            # 安装开发依赖
 npm run typecheck      # 严格类型检查（src + examples + tests）
-npm test               # 构建并运行全部测试（97 个用例，无需浏览器/GPU）
+npm test               # 构建并运行全部测试（160 个用例，无需浏览器/GPU）
 npm run build          # 产出 ESM 到 dist/
 npm run build:examples # esbuild 打包示例到 dist-examples/
 npm run build:verify   # 打包内部验证页（_verify-shared / _verify-sphere / _verify-2d-clip / _verify-2d-parity）
@@ -123,6 +123,13 @@ WebGL2 / WebGPU 共用一套实现：
   （连同样式、字体、裁剪一起压栈）；
 - 裁剪：`clipRect` / `clip()`（轴对齐矩形，设备空间 scissor，可嵌套）；
 - 文本：`fillText` + `font`（隐藏 canvas 栅格化字形 → 纹理缓存、随 fillStyle 着色）；
+- 阴影：`shadowColor / shadowBlur / shadowOffsetX·Y` —— 真高斯图层
+  （遮罩 → 横竖两次 9-tap 可分离模糊 → 按阴影色合成），按参数分组，与原生逐像素
+  对齐（对照页 `?scene=shadow` 整幅 ≈ 0.17）；
+- 合成：`globalCompositeOperation` **25 种全部支持** —— 14 种走硬件混合状态；
+  `overlay / color-dodge / color-burn / hard-light / soft-light / difference /
+  exclusion / hue / saturation / color / luminosity` 这 11 种按 W3C 公式自动切
+  「2D 图层 + ping-pong」（只在用到时才多开图层，普通帧零开销）；
 - 性能：CPU 三角化 → 动态合批，每帧少量 `drawIndexed`。
 
 `examples/shapes2d` 展示了上述全部能力（含动画与裁剪层叠）。
@@ -463,10 +470,12 @@ src/
     shadow/    ShadowRenderer + ShadowMap/ShadowCamera/ShadowState/ShadowResources
                + ShadowDepthMaterial（只写深度的材质）
   render2d/    Canvas2D 完整 2D：路径/贝塞尔/arc/圆角矩形、填充描边、渐变、
-               变换、文本、裁剪（WebGL2/WebGPU 共用）
+               变换、文本、裁剪、阴影、25 种合成模式（WebGL2/WebGPU 共用）
                path.ts / style.ts / renderer2d.ts 为 barrel，实现拆到
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
-               RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
+               RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts、
+               composite.ts（硬件混合表）、blurPass.ts（阴影高斯）、
+               blendPass.ts（以目标为纹理的图层混合）
   __tests__    node --test 测试
 examples/      19 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包

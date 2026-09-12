@@ -1,5 +1,5 @@
 import type { Device } from "../device/Device.js";
-import type { RenderPassEncoder } from "../command/encoder.js";
+import type { CommandEncoder, RenderPassEncoder } from "../command/encoder.js";
 import type { Texture } from "../device/resources.js";
 import type { BindGroup, BindGroupLayout, Buffer, Program, RenderPipeline, Sampler } from "../device/resources.js";
 import { ColorWriteMask } from "../device/descriptors.js";
@@ -19,6 +19,7 @@ import type { Contour } from "./pathTypes.js";
 import { blendForComposite } from "./composite.js";
 import { RenderTarget } from "../render/RenderTarget.js";
 import { BlurPass, ShadowCompositePass } from "./blurPass.js";
+import { BlendModePass, LayerPass, PREMULTIPLIED_OVER, dstTextureBlendIndex } from "./blendPass.js";
 import { logger } from "../util/logger.js";
 import { sourceSize, textureFromImageSource, type CanvasImageSourceLike } from "../render/texture/image.js";
 import type { Pt2 } from "./matrix.js";
@@ -120,6 +121,16 @@ export class Canvas2D {
    * 要等调用方 submit 才回放 —— 共用一张纹理会让后一组的遮罩覆写前一组的。
    */
   private readonly shadowLayers = new Map<string, { mask: RenderTarget; dst: RenderTarget | null; texture: Texture }>();
+  /** 图层模式：本帧内容先画在这两张上 ping-pong（只在出现「目标当纹理」的混合模式时才建） */
+  private layerA: RenderTarget | null = null;
+  private layerB: RenderTarget | null = null;
+  /** 图层模式：单个 op 的源图层（与目标图层混合用） */
+  private layerSrc: RenderTarget | null = null;
+  private layerSamples = 0;
+  private blendModePass: BlendModePass | null = null;
+  private layerPresentPass: LayerPass | null = null;
+  private layerPassKey = "";
+  private layerPresentKey = "";
   /** 图案采样器（按重复方式缓存） */
   private readonly patternSamplers = new Map<PatternRepetition, Sampler>();
 
@@ -504,13 +515,14 @@ export class Canvas2D {
     return this.state.globalCompositeOperation;
   }
   set globalCompositeOperation(v: string) {
-    if (!blendForComposite(v)) {
+    if (!blendForComposite(v) && dstTextureBlendIndex(v) < 0) {
       if (!this.warnedComposite.has(v)) {
         this.warnedComposite.add(v);
         logger.warn(
           `[unidraw] Canvas2D 暂不支持 globalCompositeOperation = "${v}"，已回退为 source-over。` +
             `支持的模式：source-over/destination-over/source-in/destination-in/source-out/destination-out/` +
-            `source-atop/destination-atop/xor/lighter/copy/multiply/screen/darken/lighten。`,
+            `source-atop/destination-atop/xor/lighter/copy/multiply/screen/darken/lighten，` +
+            `以及 overlay/color-dodge/color-burn/hard-light/soft-light/difference/exclusion/hue/saturation/color/luminosity。`,
         );
       }
       this.state.globalCompositeOperation = "source-over";
@@ -668,6 +680,31 @@ export class Canvas2D {
     for (const op of this.ops) if (op.shadow !== undefined && !shadowKeys.includes(op.shadow)) shadowKeys.push(op.shadow);
     const pendingGroups = new Set(shadowKeys);
 
+    // ---- 图层模式 ----
+    // overlay / color-dodge / … / luminosity 这 11 种要把**目标**读成纹理，而目标就是
+    // 调用方的 pass 附件（同一个 pass 里不能既当附件又当采样源）。所以这一帧整体改成
+    // 「先画进自己的图层，最后再呈现到调用方 pass」；只有真的用到这些模式才切，普通帧
+    // 的路径完全不变（也保证 Canvas2D 叠在 3D 场景上时照旧直接画进去）。
+    const needsLayer = this.ops.some((op) => op.shadow === undefined && dstTextureBlendIndex(op.comp) >= 0);
+    let layerFront: RenderTarget | null = null;
+    let layerBack: RenderTarget | null = null;
+    if (needsLayer) {
+      const lw = Math.max(1, this.viewW);
+      const lh = Math.max(1, this.viewH);
+      const samples = Math.max(1, pass.sampleCount);
+      if (this.layerSamples !== samples) {
+        for (const t of [this.layerA, this.layerB, this.layerSrc]) t?.dispose();
+        this.layerA = null;
+        this.layerB = null;
+        this.layerSrc = null;
+        this.layerSamples = samples;
+        this.layerPassKey = "";
+        this.layerPresentKey = "";
+      }
+      layerFront = this.ensureLayerTarget("a", lw, lh, this.layerFormat(), samples);
+      layerBack = this.ensureLayerTarget("b", lw, lh, this.layerFormat(), samples);
+    }
+
     let lastClip: DeviceRect | null = null;
     let clipInit = false;
     /** 当前绑定在 binding 1 的纹理（渐变 LUT / 字形图集） */
@@ -676,13 +713,47 @@ export class Canvas2D {
     /** 当前管线（kind + 合成模式 + 采样数 的组合） */
     let lastPipeKey: string | null = null;
 
+    // 图层的 pass **按需开**：混合 op 之后往往没有别的绘制了，提前开一个空 pass 会白做
+    // 一次 MSAA 解析。开 pass 会重置管线/绑定/裁剪缓存，所以这里顺手把它们作废。
+    let layerSink: RenderPassEncoder | null = null;
+    let layerEnc: CommandEncoder | null = null;
+    let layerStarted = false;
+    const openLayer = (): RenderPassEncoder | null => {
+      if (!needsLayer || !layerFront) return null;
+      if (layerSink) return layerSink;
+      layerEnc = this.device.createCommandEncoder("2d-layer");
+      layerSink = layerEnc.beginRenderPass({
+        label: "2d-layer",
+        colorAttachments: [
+          layerStarted
+            ? layerFront.colorAttachment({ loadOp: "load" })
+            : layerFront.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } }),
+        ],
+        depthStencilAttachment: null,
+      });
+      layerStarted = true;
+      lastPipeKey = null;
+      lastTex = null;
+      lastSampler = null;
+      clipInit = false;
+      return layerSink;
+    };
+    const closeLayer = (): void => {
+      if (!layerSink || !layerEnc) return;
+      layerSink.end();
+      this.device.submit([layerEnc.finish()]);
+      layerSink = null;
+      layerEnc = null;
+    };
+
     for (const op of this.ops) {
       if (op.shadow !== undefined) {
         // 合成位置 = **该组第一个 op 之前**：早于它会被本帧先画的背景 op 盖掉，
         // 晚于它就会盖住本体。合成会改掉 pass 的管线/绑定，所以缓存全部作废。
         if (pendingGroups.delete(op.shadow)) {
           this.renderShadowLayer(op.shadow, pass.sampleCount);
-          this.compositeShadow(pass, op.shadow);
+          const shadowSink = openLayer();
+          this.compositeShadow(shadowSink ?? pass, op.shadow);
           lastPipeKey = null;
           lastTex = null;
           lastSampler = null;
@@ -690,10 +761,49 @@ export class Canvas2D {
         }
         continue; // 阴影 op 只在遮罩图层里画
       }
+
+      // 需要「目标当纹理」的混合模式：当前图层当 dst、这个 op 单独画一张 src，
+      // 混合进另一张图层后继续在它上面画（ping-pong）。
+      const blendIndex = dstTextureBlendIndex(op.comp);
+      if (blendIndex >= 0 && layerFront && layerBack) {
+        const lw = Math.max(1, this.viewW);
+        const lh = Math.max(1, this.viewH);
+        const samples = Math.max(1, pass.sampleCount);
+        closeLayer();
+
+        const srcLayer = this.ensureLayerTarget("src", lw, lh, this.layerFormat(), samples);
+        const srcEnc = this.device.createCommandEncoder("2d-blend-src");
+        const srcPass = srcEnc.beginRenderPass({
+          label: "2d-blend-src",
+          colorAttachments: [srcLayer.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
+          depthStencilAttachment: null,
+        });
+        this.drawOpRaw(srcPass, op, samples);
+        srcPass.end();
+        this.device.submit([srcEnc.finish()]);
+
+        const blendPass = this.ensureBlendModePass(this.layerFormat(), samples);
+        const bEnc = this.device.createCommandEncoder("2d-blend");
+        const bPass = bEnc.beginRenderPass({
+          label: "2d-blend",
+          colorAttachments: [layerBack.colorAttachment({ clearValue: { r: 0, g: 0, b: 0, a: 0 } })],
+          depthStencilAttachment: null,
+        });
+        blendPass.drawBlend(bPass, layerFront.texture, srcLayer.texture, lw, lh, blendIndex, this.layerFlipY());
+        bPass.end();
+        this.device.submit([bEnc.finish()]);
+
+        const swap = layerFront;
+        layerFront = layerBack;
+        layerBack = swap;
+        continue;
+      }
+
+      const sink = openLayer() ?? pass;
       const c = op.clip;
       if (!clipInit || !sameClip(lastClip, c)) {
-        if (c) pass.setScissorRect(c.x, c.y, c.w, c.h);
-        else pass.setScissorRect(0, 0, this.viewW, this.viewH);
+        if (c) sink.setScissorRect(c.x, c.y, c.w, c.h);
+        else sink.setScissorRect(0, 0, this.viewW, this.viewH);
         lastClip = c;
         clipInit = true;
       }
@@ -702,16 +812,16 @@ export class Canvas2D {
       if (lastPipeKey !== pipeKey) {
         lastPipeKey = pipeKey;
         if (op.kind === "flat") {
-          pass.setPipeline(this.pipelineFor("flat", pass.sampleCount, op.comp));
+          sink.setPipeline(this.pipelineFor("flat", pass.sampleCount, op.comp));
           if (this.flatVBuf && this.flatIBuf) {
-            pass.setVertexBuffer(0, this.flatVBuf);
-            pass.setIndexBuffer(this.flatIBuf, "uint16");
+            sink.setVertexBuffer(0, this.flatVBuf);
+            sink.setIndexBuffer(this.flatIBuf, "uint16");
           }
         } else {
-          pass.setPipeline(this.pipelineFor("tex", pass.sampleCount, op.comp));
+          sink.setPipeline(this.pipelineFor("tex", pass.sampleCount, op.comp));
           if (this.textVBuf && this.textIBuf) {
-            pass.setVertexBuffer(0, this.textVBuf);
-            pass.setIndexBuffer(this.textIBuf, "uint16");
+            sink.setVertexBuffer(0, this.textVBuf);
+            sink.setIndexBuffer(this.textIBuf, "uint16");
           }
         }
       }
@@ -719,13 +829,96 @@ export class Canvas2D {
       const wantTex = (op.kind === "flat" ? (op.lut ?? this.solidLut) : op.texture) as Texture;
       const wantSampler = (op.kind === "flat" ? op.sampler : undefined) ?? this.sampler;
       if (lastTex !== wantTex || lastSampler !== wantSampler) {
-        pass.setBindGroup(0, this.textureGroup(wantTex, wantSampler));
+        sink.setBindGroup(0, this.textureGroup(wantTex, wantSampler));
         lastTex = wantTex;
         lastSampler = wantSampler;
       }
       const n = op.iEnd - op.iStart;
-      if (n > 0) pass.drawIndexed(n, 1, op.iStart, 0, 0);
+      if (n > 0) sink.drawIndexed(n, 1, op.iStart, 0, 0);
     }
+
+    // 图层模式收尾：把图层呈现到调用方 pass（预乘 over，透明处保留调用方原有内容）
+    if (needsLayer && layerFront) {
+      const lw = Math.max(1, this.viewW);
+      const lh = Math.max(1, this.viewH);
+      closeLayer();
+      const present = this.ensureLayerPresentPass(this.layerFormat(), Math.max(1, pass.sampleCount));
+      pass.setScissorRect(0, 0, lw, lh);
+      present.drawLayer(pass, layerFront.texture, lw, lh, this.layerFlipY());
+    }
+  }
+
+  /** 图层模式用的颜色格式（与调用方 pass 一致） */
+  private layerFormat(): TextureFormat {
+    return (this.pipelineFormat ?? this.device.canvasFormat() ?? "rgba8unorm") as TextureFormat;
+  }
+
+  /** 采样的是几何渲染出来的纹理，WebGPU 的行序反过来（与 `CopyPass.flipY` 同一套道理） */
+  private layerFlipY(): boolean {
+    return this.device.kind === "webgpu";
+  }
+
+  private ensureLayerTarget(which: "a" | "b" | "src", w: number, h: number, format: TextureFormat, sampleCount: number): RenderTarget {
+    const cur = which === "a" ? this.layerA : which === "b" ? this.layerB : this.layerSrc;
+    if (cur) {
+      cur.resize(w, h);
+      return cur;
+    }
+    const made = new RenderTarget(this.device, { label: `2d-layer-${which}`, width: w, height: h, format, depth: false, sampleCount });
+    if (which === "a") this.layerA = made;
+    else if (which === "b") this.layerB = made;
+    else this.layerSrc = made;
+    return made;
+  }
+
+  private ensureBlendModePass(format: TextureFormat, sampleCount: number): BlendModePass {
+    const key = `${format}|${sampleCount}`;
+    if (this.layerPassKey !== key || !this.blendModePass) {
+      this.blendModePass?.dispose();
+      this.blendModePass = new BlendModePass(this.device, format, sampleCount);
+      this.layerPassKey = key;
+    }
+    return this.blendModePass;
+  }
+
+  private ensureLayerPresentPass(format: TextureFormat, sampleCount: number): LayerPass {
+    const key = `${format}|${sampleCount}`;
+    if (this.layerPresentKey !== key || !this.layerPresentPass) {
+      this.layerPresentPass?.dispose();
+      this.layerPresentPass = new LayerPass(this.device, format, sampleCount, PREMULTIPLIED_OVER);
+      this.layerPresentKey = key;
+    }
+    return this.layerPresentPass;
+  }
+
+  /**
+   * 把单个 op 按 **source-over** 画进目标（图层模式的源图层用）。
+   *
+   * 刻意忽略 op 自己的合成模式：源图层要的是「这个 op 画出来的原始颜色」，
+   * 与目标的混合交给 `BlendModePass` 的着色器算。
+   */
+  private drawOpRaw(pass: RenderPassEncoder, op: Op, sampleCount: number): void {
+    const c = op.clip;
+    if (c) pass.setScissorRect(c.x, c.y, c.w, c.h);
+    else pass.setScissorRect(0, 0, this.viewW, this.viewH);
+    if (op.kind === "flat") {
+      pass.setPipeline(this.pipelineFor("flat", sampleCount, "source-over"));
+      if (this.flatVBuf && this.flatIBuf) {
+        pass.setVertexBuffer(0, this.flatVBuf);
+        pass.setIndexBuffer(this.flatIBuf, "uint16");
+      }
+    } else {
+      pass.setPipeline(this.pipelineFor("tex", sampleCount, "source-over"));
+      if (this.textVBuf && this.textIBuf) {
+        pass.setVertexBuffer(0, this.textVBuf);
+        pass.setIndexBuffer(this.textIBuf, "uint16");
+      }
+    }
+    const wantTex = (op.kind === "flat" ? (op.lut ?? this.solidLut) : op.texture) as Texture;
+    const wantSampler = (op.kind === "flat" ? op.sampler : undefined) ?? this.sampler;
+    pass.setBindGroup(0, this.textureGroup(wantTex, wantSampler));
+    const n = op.iEnd - op.iStart;
+    if (n > 0) pass.drawIndexed(n, 1, op.iStart, 0, 0);
   }
 
   private ensureCapacity(): void {

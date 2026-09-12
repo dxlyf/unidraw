@@ -11,14 +11,16 @@
  * 「逐通道的源/目标颜色」（GL 的 `DST_COLOR`、WebGPU 的 `dst`），混合方程也都有
  * `min` / `max`；因此不需要把目标读成纹理（那需要 2D 图层与额外的 pass）。
  *
- * 不支持的（overlay / color-dodge / color-burn / hard-light / soft-light /
- * difference / exclusion / hue / saturation / color / luminosity）需要**以目标为输入
- * 的着色器**，即「2D 图层 + ping-pong」；调用时会回退到 source-over 并告警。
+ * 不支持硬件混合、改由 `blendPass.ts` 的**图层模式**实现的（overlay / color-dodge /
+ * color-burn / hard-light / soft-light / difference / exclusion / hue / saturation /
+ * color / luminosity）：这些要以**目标为输入**算 `B(Cb, Cs)`，走「2D 图层 + ping-pong」
+ * + 一个读 (dst, src) 两张纹理的着色器（见 `dstTextureBlendIndex`）。
  *
  * `clearsOutside`：原生这些算子在「源覆盖率为 0」的区域会把目标也清掉
  * （等于拿整块画布参与运算）。逐片元混合只作用于画到的像素，所以要额外画一块
  * **路径的补集**（画布矩形 − 路径，evenodd 求得）并带上同一个混合状态，
- * 把形状之外的部分按规则清掉。
+ * 把形状之外的部分按规则清掉。图层模式那 11 种在 `αs = 0` 处公式本身就退化成恒等，
+ * 不需要补集四边形。
  */
 
 import type { BlendFactor, BlendOperation } from "../gpu/types.js";

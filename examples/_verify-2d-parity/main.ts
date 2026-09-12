@@ -620,6 +620,74 @@ function drawComposite(c: SceneCtx): void {
   });
 }
 
+/** 图层模式场景：11 种「以目标为纹理」的混合模式，每格底图不同以便区分公式 */
+const BLEND_MODES = [
+  "overlay",
+  "color-dodge",
+  "color-burn",
+  "hard-light",
+  "soft-light",
+  "difference",
+  "exclusion",
+  "hue",
+  "saturation",
+  "color",
+  "luminosity",
+] as const;
+
+const BLEND_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [];
+const BLEND_CELL_W = 120;
+const BLEND_CELL_H = 90;
+BLEND_MODES.forEach((mode, i) => {
+  const col = i % 4;
+  const row = Math.floor(i / 4);
+  BLEND_REGIONS.push({ name: mode, x: col * BLEND_CELL_W + 4, y: row * BLEND_CELL_H + 2, w: BLEND_CELL_W - 8, h: BLEND_CELL_H - 16 });
+});
+
+function drawBlendModes(c: SceneCtx): void {
+  c.fillStyle = "#0b0c10";
+  c.fillRect(0, 0, W, H);
+  c.font = `600 10px ${FONT}`;
+
+  BLEND_MODES.forEach((mode, i) => {
+    const col = i % 4;
+    const row = Math.floor(i / 4);
+    const x = col * BLEND_CELL_W + 6;
+    const y = row * BLEND_CELL_H + 4;
+    const w = BLEND_CELL_W - 12;
+    const h = BLEND_CELL_H - 20;
+
+    // 底图：三段不同明度的色块 + 一段渐变，覆盖公式的各个分支
+    c.globalCompositeOperation = "source-over";
+    c.globalAlpha = 1;
+    c.fillStyle = "#20304a";
+    c.fillRect(x, y, w, h);
+    c.fillStyle = "#6fd0ff";
+    c.fillRect(x, y, w * 0.3, h);
+    c.fillStyle = "#ffbe4d";
+    c.fillRect(x + w * 0.3, y, w * 0.35, h);
+    c.fillStyle = "#c9d4e6";
+    c.fillRect(x + w * 0.65, y, w * 0.35, h);
+
+    // 源：一个覆盖大半格的斜向渐变矩形（用纯色 + 半透明圆两层，考察 αs 混合）
+    c.globalCompositeOperation = mode;
+    c.globalAlpha = 0.85;
+    c.fillStyle = "#8f5cff";
+    c.beginPath();
+    c.roundRect(x + w * 0.12, y + h * 0.15, w * 0.6, h * 0.7, 8);
+    c.fill();
+    c.fillStyle = "#2ee6a8";
+    c.beginPath();
+    c.arc(x + w * 0.62, y + h * 0.55, Math.min(w, h) * 0.28, 0, Math.PI * 2);
+    c.fill();
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = "source-over";
+
+    c.fillStyle = "#8b93a7";
+    c.fillText(mode, x, y + h + 11);
+  });
+}
+
 function drawScene(c: SceneCtx, g: GradientFactory): void {
   // 背景：竖向线性渐变（整幅不透明，两侧都从透明画到不透明）
   const bg = g.linear(0, 0, 0, H);
@@ -770,6 +838,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   fillrules: { label: "填充规则", draw: (c) => drawFillRules(c), regions: FILL_REGIONS },
   extras: { label: "虚线/文字API", draw: (c) => drawTextDash(c), regions: EXTRAS_REGIONS },
   composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
+  blend: { label: "图层混合模式", draw: (c) => drawBlendModes(c), regions: BLEND_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
   stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },
