@@ -17,7 +17,8 @@ const chrome = spawn(
     "--no-sandbox",
     ...extra,
     "--hide-scrollbars",
-    "--window-size=520,420",
+    // 窗口尺寸可用 PROBE_WINDOW=1920x1080 覆盖：性能类排查需要在真实分辨率下比较
+    `--window-size=${process.env.PROBE_WINDOW ?? "520,420"}`.replace("x", ","),
     `--user-data-dir=${profile}`,
     `--remote-debugging-port=${port}`,
     "--force-color-profile=srgb",

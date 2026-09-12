@@ -15,7 +15,7 @@
 | 统一资源与命令 | `Buffer / Texture / Sampler / Program / RenderPipeline / BindGroup` 与 `beginRenderPass → setPipeline → setBindGroup → draw…` 全部与后端无关 |
 | 三种后端 | **WebGL2**（完整实现）、**WebGPU**（完整实现）、**Mock**（无头 CPU 后端，Node 单测用） |
 | 一套 UBO | `std140` 布局引擎同时驱动 GLSL `layout(std140)`、WGSL uniform 与 CPU 侧打包；支持**动态偏移环形 UBO**（共享材质逐物体矩阵，一次绘制换一个槽） |
-| 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial`，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
+| 内置材质 | `ColorMaterial`(Lambert) / `UnlitColorMaterial` / `PhongMaterial`(Blinn-Phong 高光) / `TextureMaterial` / `StandardMaterial`(metallic-roughness PBR：Cook-Torrance GGX + Smith + Schlick，`roughness`/`metalness`/`emissive`/`map`/`normalMap`)，自带 GLSL ES 3.00 + WGSL 双实现，支持 alpha 混合/双面/材质参数 |
 | 混合模式 | `MaterialOptions.blend` 自定义混合状态（src/dst factor + operation，与 WebGPU `GPUBlendComponent` 一一对应）、`BLEND_PRESETS` 常用预设、`depthWrite` 开关；带 `blend`/`alphaBlend` 的材质自动标记为半透明，`SceneRenderer` 把它们排在不透明物体之后并按距离**远→近**绘制 |
 | 灯光 | `AmbientLight` / `DirectionalLight`(平行光) / `PointLight` / `SpotLight`（锥角+半影），灯是场景图节点、可动画驱动；每帧自动收集打包进 `LightsBlock`（方向 4 / 点 8 / 聚 4，无灯时使用与历史等价的默认光） |
 | 阴影 | `ShadowRenderer` + `light.castShadow`：方向光（正交自动拟合 + 稳定化） / 聚光（透视）各一张深度贴图，PCF 软阴影（`filter` hard / 3×3 / 5×5）；`mapSize`/`bias`(世界单位)/`normalBias`(自动)/`radius`/`filter`/`intensity`/`side`/`stabilize` 可调，WebGL2 与 WebGPU 结果一致（示例自检数值跨后端可比） |
@@ -30,7 +30,7 @@
 | 应用门面与插件 | `App`（device/renderer/scene/camera/input/mixer/tweens/picker/stats + 单循环 `step()`）、`Plugin` 生命周期（setup/update/beforeRender/afterRender/resize/dispose）、内置 `OrbitControlsPlugin` 与 `HighlightPlugin` |
 | 数学库 | Vec2/3/4、Color、Mat4（perspective/ortho/lookAt/invert…），零依赖 |
 | 测试 | 数学 / std140 / 格式表 / 几何生成 / 回读 / 场景图·拾取 / 交互 / 动画 / 灯光 / 阴影 / 后处理 / 实例化 / 资源缓存 / App·插件（`node --test`，129 个用例） |
-| 示例 | 18 个可运行示例（同一源码切 WebGL2 / WebGPU），全部带 **lil-gui 参数面板**：**示例游戏《坦克世界》**、**2D 绘制**、**3D 材质与几何画廊**、**混合模式**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
+| 示例 | 19 个可运行示例（同一源码切 WebGL2 / WebGPU），全部带 **lil-gui 参数面板**：**示例游戏《坦克世界》**、**2D 绘制**、**3D 材质与几何画廊**、**PBR 材质（StandardMaterial 矩阵）**、**混合模式**、**拾取**、**动画**、**灯光**、**阴影**、**后处理**、**实例化**、**App+插件**与 3 个**性能档位**示例 |
 
 零运行时依赖；开发依赖仅 `typescript`、`@webgpu/types`（类型）、`esbuild`（示例打包）、`lil-gui`（示例的参数面板）。
 
@@ -140,11 +140,37 @@ WebGL2 / WebGPU 共用一套实现：
 
 - **材质**：`ColorMaterial`（Lambert 漫反射）、`UnlitColorMaterial`（无光照纯色）、
   `PhongMaterial`（Blinn-Phong 高光：`shininess / specular / ambient` 参数，
-  需要传入相机位置）、`TextureMaterial`（纹理 × Lambert）；统一支持
+  需要传入相机位置）、`TextureMaterial`（纹理 × Lambert）、
+  `StandardMaterial`（**metallic-roughness PBR**，对齐 three.js 的 `MeshStandardMaterial`：
+  Cook-Torrance 直接光 GGX + Smith + Schlick、常量辐照度环境光近似，参数
+  `color / roughness / metalness / emissive / emissiveIntensity / map / normalMap / normalScale`，
+  详见 [docs/lighting.md §4](docs/lighting.md)）；统一支持
   `alphaBlend` 半透明与双面（`cullMode`）；
 - **几何**：`cylinder`（上下半径可不同=圆台，可封口/开口）、`cone`、`torus`、
   `capsule`，全部带正确 UV/法线与朝外绕序（内置自检工具修正）；
 - 示例 `examples/shapes3d` 以画廊形式展示几何 × 材质组合并旋转。
+
+```ts
+import { StandardMaterial } from "unidraw";
+
+// 行 = 粗糙度、列 = 金属度的 5×5 球体矩阵（每格一个材质：参数不同就不能共享实例）
+const mat = new StandardMaterial(device, {
+  color: new Color().setHex("#c8ccd2"),
+  roughness: 0.35,
+  metalness: 1,
+  emissive: "#000000",          // 默认黑 = 无自发光
+  normalMap: normalMapTexture,  // binding 5；null = 不扰动法线
+  normalScale: 0.6,
+  receiveShadows: true,
+});
+mat.roughness = 0.15;           // 读写属性都会立即刷新 UBO
+mat.color = "#e0a878";
+```
+
+示例 `examples/standard-material` 就是这个矩阵（5×5 球体 + 粗糙不反光的网格地面 + 环境光
+/ 方向光 / 3 个彩色点光），面板可实时改粗糙度/金属度基准、颜色、自发光、法线强度、
+网格密度、灯光强度，自检 `STD_SELFTEST` 验证「粗糙度/金属度真的改变画面、粗糙度变低时
+镜面高光变锐、自发光真的抬亮暗部」（两后端数值可比）。
 
 ### 混合模式（`MaterialOptions.blend`）
 
@@ -442,7 +468,7 @@ src/
                Path2D.ts、pathTypes.ts、color.ts、LinearGradient.ts、
                RadialGradient.ts、paint.ts、Canvas2D.ts、types.ts、geometry2d.ts
   __tests__    node --test 测试
-examples/      18 个示例 + common/（demo 引导、bench 测量框架）
+examples/      19 个示例 + common/（demo 引导、bench 测量框架）
 tools/         零依赖静态服务、esbuild 示例打包
 docs/          中文文档（见下）
 ```

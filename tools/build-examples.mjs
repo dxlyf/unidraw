@@ -29,6 +29,7 @@ const demos = [
   { name: "instanced-mesh", title: "InstancedMesh · 一次绘制 N 个实例（含与独立 Mesh 的逐像素对比）" },
   { name: "shapes2d", title: "2D 绘制 · 矩形/线/圆/椭圆/多边形" },
   { name: "shapes3d", title: "3D · 材质与几何画廊" },
+  { name: "standard-material", title: "PBR · MeshStandardMaterial（metallic-roughness）" },
   { name: "blend", title: "混合模式 · blend/depthWrite/半透明排序" },
   { name: "tank-world", title: "示例游戏 · 坦克世界（AI/炮弹/阴影/后处理）" },
   { name: "picking", title: "拾取 · 射线几何命中 + GPU 颜色拾取" },
