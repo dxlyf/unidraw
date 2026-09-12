@@ -117,6 +117,9 @@ WebGL2 / WebGPU 共用一套实现：
   arc / arcTo / ellipse / closePath`（曲线自适应细分）；
 - 填充与描边：`fill()`（凸/凹多边形、耳切）/ `stroke()`（`lineCap`
   butt·round·square，`lineJoin` miter·round·bevel，`miterLimit`，`lineWidth`）；
+- 便捷图元：`fillRect` / `strokeRect` / `clearRect`（清成透明黑 —— 受变换与裁剪影响，
+  但不受 `fillStyle`/`globalAlpha`/阴影影响，与原生一致；对照页 `?scene=clear`
+  整幅 ≈ 0.04，清出的洞两侧**逐像素完全一致**）；
 - 样式：十六进制 / `Color` / `LinearGradient`（多点）/ `RadialGradient`(近似)，
   `globalAlpha`；
 - 变换与层级：`translate / rotate / scale / setTransform` + `save()/restore()`

@@ -61,7 +61,8 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
     （避免病态输入 O(n²) 爆炸）；
 - `stroke()`：线宽 / `lineCap`(butt/round/square) / `lineJoin`(miter/round/bevel)
   / `miterLimit`（同一路径的线段/接头仍是**各自覆盖**，半透明描边在接头处会比原生略深）
-- 便捷：`fillRect/strokeRect/fillCircle/strokeCircle`
+- 便捷：`fillRect/strokeRect/clearRect/fillCircle/strokeCircle`（`clearRect` 见下面
+  「clearRect」一节）
 
 ### 样式
 - `fillStyle / strokeStyle`：十六进制字符串 / `Color` / `LinearGradient`
@@ -165,6 +166,20 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 - 按**弧长**在压平后的折线上推进，奇数长度的模式复制一遍（`[5]` ≡ `[5,5]`），
   闭合轮廓跨越起点继续；每段实线各自成段，因此 `lineCap` 对每段都生效。
 
+### clearRect
+- `clearRect(x, y, w, h)` 把矩形清成**透明黑**，语义与原生一致：
+  - **受**当前变换（含旋转/缩放）与**裁剪**影响；
+  - **不受** `fillStyle` / `globalAlpha` / `shadow*` / `globalCompositeOperation`
+    影响 —— 它就是把这块擦干净；
+  - `w` 或 `h` 为 0（或非有限值）时什么都不做；
+  - **不改动当前路径**（原生也不改；`fillRect` 那种先 `beginPath()` 的做法会清掉
+    用户正在拼的路径，`clearRect` 用一条临时路径避开这个问题）；
+- 实现是「满覆盖率 + `destination-out`」：`dst = dst × (1 - 源 alpha)`，源 alpha 恒为 1，
+  于是颜色与 alpha 一起归零，正好落在透明黑上（顶点色 alpha 直接写 1，因此天然无视
+  `globalAlpha`）。不需要额外的清屏管线，也不会走阴影图层；
+- 对照页 `?scene=clear`（清出空洞 / 清后重画 / 裁剪内清除 / 旋转 + 忽略样式 / 0 尺寸）
+  整幅 ≈ 0.04，前三格与原生**逐像素完全一致（0.00）**。
+
 ### 抗锯齿
 - 曲线/斜边/细描边的锯齿由 **MSAA** 解决，默认跟随 `Renderer` 的 `msaa`（默认 4）；
   `Canvas2D` 的管线会按 `pass.sampleCount` 自动选取对应采样数的版本
@@ -226,6 +241,8 @@ nonzero 反向挖洞 / 自相交五角星），整幅平均差 ≈ 0.10，各分
 用来守 WebGL2 的一个坑：同尺寸的多张 MSAA 目标曾经共用同一个 renderbuffer，
 阴影遮罩一清屏就把图层中间结果抹掉，整幅几乎空白（WebGPU 不受影响）——
 详见 [architecture.md §6.2](architecture.md)。当前两边一致（≈ 0.63）；
+`?scene=clear` 验证 `clearRect`（清出空洞 / 清后重画 / 裁剪内清除 / 旋转 + 忽略样式 /
+0 尺寸），整幅 ≈ 0.04，其中前三格**逐像素完全一致**；
 `?scene=image` 验证 `drawImage` 的三种重载 + 旋转 + 透明：轴对齐的 1:1 / 缩放 /
 裁剪缩放 / 缩小平铺均为 **0.00**，只有旋转采样平均差 ≈ 9.6（滤波核差异）。
 

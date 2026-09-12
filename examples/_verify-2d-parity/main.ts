@@ -74,6 +74,7 @@ interface SceneCtx {
   clipRect?(x: number, y: number, w: number, h: number): void;
   /** 用当前路径做裁剪（原生侧走这个） */
   clip?(): void;
+  clearRect(x: number, y: number, w: number, h: number): void;
 }
 
 interface GradientFactory {
@@ -432,6 +433,72 @@ function drawShadowBlend(c: SceneCtx): void {
     c.roundRect(20 + i * 76, 170, 60, 60, 8);
     c.fill();
   }
+}
+
+/** clearRect 场景：清成透明黑，且不受 fillStyle/globalAlpha/阴影影响、受变换与裁剪影响 */
+const CLEAR_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "清出空洞", x: 8, y: 8, w: 150, h: 116 },
+  { name: "清后重画", x: 166, y: 8, w: 150, h: 116 },
+  { name: "裁剪内清除", x: 324, y: 8, w: 150, h: 116 },
+  { name: "变换+忽略样式", x: 8, y: 132, w: 466, h: 130 },
+];
+
+function drawClearRect(c: SceneCtx): void {
+  // 底：整块不透明底图（清出来的洞在对照页上就是透明，两侧应完全一致）
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  // 1) 实心块中间清一个洞
+  c.fillStyle = "#35d7ee";
+  c.fillRect(30, 30, 110, 72);
+  c.clearRect(60, 45, 50, 40);
+
+  // 2) 清掉之后重新画（验证 op 顺序）
+  c.fillStyle = "#ff9a3d";
+  c.fillRect(190, 30, 110, 72);
+  c.clearRect(215, 45, 60, 40);
+  c.fillStyle = "#3dd68c";
+  c.fillRect(235, 55, 40, 22);
+
+  // 3) 裁剪内清除：只有裁剪区内的部分被清掉
+  c.save();
+  if (c.clipRect) c.clipRect(348, 30, 50, 72);
+  else {
+    c.beginPath();
+    c.rect(348, 30, 50, 72);
+    c.clip!();
+  }
+  c.fillStyle = "#b07cff";
+  c.fillRect(340, 24, 120, 84);
+  c.clearRect(360, 40, 90, 50);
+  c.restore();
+
+  // 4) 变换 + 忽略 globalAlpha / fillStyle / 阴影：
+  //    即使 globalAlpha=0.3、fillStyle 是渐变、还开着阴影，也必须清得干干净净
+  c.save();
+  c.translate(120, 190);
+  c.rotate(0.25);
+  c.globalAlpha = 0.3;
+  c.fillStyle = "#f5d02e";
+  c.fillRect(-70, -40, 140, 80);
+  c.globalAlpha = 0.3;
+  c.shadowColor = "rgba(255,0,0,0.9)";
+  c.shadowBlur = 14;
+  c.shadowOffsetX = 6;
+  c.shadowOffsetY = 6;
+  c.clearRect(-30, -18, 60, 36);
+  c.shadowColor = "rgba(0,0,0,0)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+  c.globalAlpha = 1;
+  c.restore();
+
+  // 5) 宽度为 0：什么都不做（也不该报错）
+  c.fillStyle = "#ff5c7a";
+  c.fillRect(300, 160, 120, 60);
+  c.clearRect(320, 170, 0, 40);
+  c.clearRect(360, 170, 40, 0);
 }
 
 /** 描边场景：闭合路径首尾的 join（原生 vs 本框架） */
@@ -930,6 +997,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
   blend: { label: "图层混合模式", draw: (c) => drawBlendModes(c), regions: BLEND_REGIONS },
   shadowblend: { label: "阴影+图层混合", draw: (c) => drawShadowBlend(c), regions: SHADOWBLEND_REGIONS },
+  clear: { label: "clearRect", draw: (c) => drawClearRect(c), regions: CLEAR_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
   stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },

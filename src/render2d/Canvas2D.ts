@@ -1453,6 +1453,49 @@ export class Canvas2D {
     this.fill();
     return this;
   }
+  /**
+   * 把矩形清成**透明黑**（原生 `clearRect`）。
+   *
+   * 与原生一致的三条语义：
+   * - **受**当前变换（`translate/rotate/scale`）与**裁剪**影响；
+   * - **不受** `fillStyle` / `globalAlpha` / `shadow*` / 当前
+   *   `globalCompositeOperation` 影响 —— 它就是把这块擦干净；
+   * - 宽或高为 0 时什么都不做。
+   *
+   * 实现等价于「满覆盖率 + `destination-out`」：`dst = dst × (1 - 源 alpha)`，
+   * 源 alpha 取 1，于是颜色与 alpha 一起归零，正好是透明黑。
+   *
+   * 另外它**不改动当前路径**（与原生一致，`fillRect` 那种先 `beginPath()` 的做法
+   * 会清掉用户正在拼的路径，这里用一条临时路径）。
+   */
+  clearRect(x: number, y: number, w: number, h: number): this {
+    if (!Number.isFinite(x + y + w + h) || w === 0 || h === 0) return this;
+    const rectPath = new Path2D();
+    rectPath.rect(x, y, w, h);
+    const polys: Pt2[][] = [];
+    for (const contour of rectPath.flatten(0.2)) {
+      if (contour.points.length >= 3) polys.push(contour.points);
+    }
+    if (polys.length === 0) return this;
+    const tris = fillTriangles(polys, "nonzero");
+    if (tris.length === 0) return this;
+
+    const savedPaint = this.paint;
+    const savedComp = this.state.globalCompositeOperation;
+    // 顶点色的 alpha 直接写 1（`pushFlat` 用的是 paint.vcolor），所以天然无视
+    // globalAlpha；`destination-out` 只看源 alpha，颜色本身无所谓。
+    this.paint = { kind: 0, frame: [0, 0, 0, 0, 0, 0, 1], lut: null, vcolor: [1, 1, 1, 1] };
+    this.state.globalCompositeOperation = "destination-out";
+    const iStart = this.flatI.length;
+    for (const tri of tris) {
+      const ids: number[] = [this.pushFlat(tri[0]![0], tri[0]![1]), this.pushFlat(tri[1]![0], tri[1]![1]), this.pushFlat(tri[2]![0], tri[2]![1])];
+      this.pushTri("flat", ids[0]!, ids[1]!, ids[2]!);
+    }
+    this.recordFlat(iStart, polys);
+    this.state.globalCompositeOperation = savedComp;
+    this.paint = savedPaint;
+    return this;
+  }
   strokeRect(x: number, y: number, w: number, h: number): this {
     this.beginPath();
     this.rect(x, y, w, h);
