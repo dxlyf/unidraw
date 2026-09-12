@@ -1,0 +1,1 @@
+{"version":3,"file":"gpuUtils.d.ts","sourceRoot":"","sources":["../../../../src/device/backend/mock/gpuUtils.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,iBAAiB,EAAE,MAAM,sBAAsB,CAAC;AAG9D,wBAAgB,kBAAkB,CAAC,IAAI,EAAE,gBAAgB,GAAG,SAAS,GAAG,SAAS,EAAE,QAAQ,EAAE,iBAAiB,EAAE,OAAO,EAAE,MAAM,GAAG,IAAI,CAIrI;AAED,wBAAgB,SAAS,CAAC,CAAC,EAAE,MAAM,GAAG,MAAM,CAE3C"}

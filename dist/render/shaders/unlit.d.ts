@@ -1,0 +1,3 @@
+export declare const UNLIT_FRAGMENT_GLSL = "#version 300 es\nprecision highp float;\n\nlayout(std140) uniform MaterialBlock {\n  vec4 u_color;\n};\n\nin vec3 v_worldPos;\nin vec3 v_normal;\nin vec2 v_uv;\nout vec4 fragColor;\n\nvoid main() {\n  fragColor = u_color;\n}\n";
+export declare const UNLIT_FRAGMENT_WGSL = "\nstruct MaterialBlock {\n  u_color : vec4f,\n};\n@group(0) @binding(2) var<uniform> material : MaterialBlock;\n\nstruct FSIn {\n  @builtin(position) clip_pos : vec4f,\n  @location(0) v_worldPos : vec3f,\n  @location(1) v_normal : vec3f,\n  @location(2) v_uv : vec2f,\n};\n\n@fragment\nfn fs_main(in : FSIn) -> @location(0) vec4f {\n  return material.u_color;\n}\n";
+//# sourceMappingURL=unlit.d.ts.map

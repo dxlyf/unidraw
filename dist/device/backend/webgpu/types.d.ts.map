@@ -1,0 +1,1 @@
+{"version":3,"file":"types.d.ts","sourceRoot":"","sources":["../../../../src/device/backend/webgpu/types.ts"],"names":[],"mappings":"AAIA,MAAM,WAAW,mBAAmB;IAClC,eAAe,CAAC,EAAE,kBAAkB,CAAC;IACrC,kBAAkB;IAClB,iBAAiB,CAAC,EAAE,gBAAgB,CAAC;IACrC,KAAK,CAAC,EAAE,MAAM,CAAC;CAChB"}

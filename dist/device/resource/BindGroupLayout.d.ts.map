@@ -1,0 +1,1 @@
+{"version":3,"file":"BindGroupLayout.d.ts","sourceRoot":"","sources":["../../../src/device/resource/BindGroupLayout.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,yBAAyB,EAAE,MAAM,mBAAmB,CAAC;AACnE,OAAO,EAAE,YAAY,EAAE,MAAM,mBAAmB,CAAC;AAEjD;;GAEG;AACH,8BAAsB,eAAgB,SAAQ,YAAY;IACxD,QAAQ,CAAC,UAAU,EAAE,yBAAyB,CAAC;IAE/C,YAAY,IAAI,EAAE,yBAAyB,EAG1C;IAED,IAAI,OAAO,iEAEV;CACF"}

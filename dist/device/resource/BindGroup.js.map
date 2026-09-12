@@ -1,0 +1,1 @@
+{"version":3,"file":"BindGroup.js","sourceRoot":"","sources":["../../../src/device/resource/BindGroup.ts"],"names":[],"mappings":"AACA,OAAO,EAAE,YAAY,EAAE,MAAM,mBAAmB,CAAC;AAEjD;;GAEG;AACH,MAAM,OAAgB,SAAU,SAAQ,YAAY;IACzC,UAAU,CAAsB;IAEzC,YAAY,IAAyB;QACnC,KAAK,CAAC,IAAI,CAAC,KAAK,CAAC,CAAC;QAClB,IAAI,CAAC,UAAU,GAAG,IAAI,CAAC;IACzB,CAAC;CACF"}

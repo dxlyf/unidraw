@@ -1,0 +1,1 @@
+{"version":3,"file":"MockProgram.js","sourceRoot":"","sources":["../../../../../src/device/backend/mock/resources/MockProgram.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,OAAO,EAAE,MAAM,uBAAuB,CAAC;AAIhD,MAAM,OAAO,WAAY,SAAQ,OAAO;IACtC,YAAY,MAAkB,EAAE,IAAuB;QACrD,KAAK,CAAC,IAAI,CAAC,CAAC;QACZ,MAAM,CAAC,QAAQ,CAAC,IAAI,CAAC,CAAC;IACxB,CAAC;IACS,aAAa,KAAU,CAAC;CACnC"}
