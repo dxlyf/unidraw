@@ -156,13 +156,10 @@ c2d.flush(pass, Mat4.ortho(0, canvas.width, canvas.height, 0, -1, 1));
 - 字形纹理在 DPR>1 时以设备像素栅格化（缩小绘制可能略糊，可后续按 DPR 缓存）；
 - 尚未支持：`shadowBlur`（需要离屏模糊）、需要「目标作为纹理」的合成模式
   （`overlay` / `difference` / `hue` 等 11 种）。
-- **图案填充已知差异**：`createPattern` 的 `repeat` 与原生逐像素一致（0.04），
-  但 `repeat-x` / `repeat-y` / `no-repeat` 实测与原生差距较大
-  （60 / 98 / 81）。初步定位：**采样器的寻址模式似乎没有生效**
-  —— 把 `repeat` 采样器换成 `clamp-to-edge`、或把重复标记改成「两轴都重复」，
-  输出**逐像素完全相同**，说明纹理仍按创建时的 GL 默认（REPEAT）采样。
-  这是一个框架级的线索（会影响所有依赖 wrap 模式的用法），
-  下一轮应先排查 `bindGroup` 里的 `bindSampler` 与纹理单元的配对。
+- **图案填充**：`repeat` / `repeat-x` / `repeat-y` / `no-repeat` 均与原生对齐
+  （对照页 `?scene=pattern` 整幅 ≈ 0.70）。未重复的轴按原生语义在 `[0,1]` 之外裁成透明
+  （CLAMP_TO_EDGE 采样会把边缘像素拉出去，所以着色器里额外做了裁剪）；
+  图案用作**文字**填充时字形图集按顶点色渲染（未走图案），是已知差异。
 
 ## 与原生的差距（量化）
 

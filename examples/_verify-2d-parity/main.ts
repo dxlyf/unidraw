@@ -34,6 +34,7 @@ interface SceneCtx {
   lineWidth: number;
   lineCap: string;
   lineJoin: string;
+  miterLimit: number;
   globalAlpha: number;
   font: string;
   beginPath(): void;
@@ -269,6 +270,78 @@ function drawTextDash(c: SceneCtx): void {
   c.lineTo(456, 264);
   c.stroke();
   void w;
+}
+
+/** 描边场景：闭合路径首尾的 join（原生 vs 本框架） */
+const STROKE_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "rect+miter", x: 8, y: 8, w: 116, h: 116 },
+  { name: "closePath三角", x: 128, y: 8, w: 116, h: 116 },
+  { name: "首尾重合点", x: 248, y: 8, w: 116, h: 116 },
+  { name: "整圆arc", x: 368, y: 8, w: 106, h: 116 },
+  { name: "closePath圆角", x: 8, y: 132, w: 226, h: 128 },
+  { name: "五角星miter", x: 244, y: 132, w: 230, h: 128 },
+];
+
+function drawStrokes(c: SceneCtx): void {
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+  c.strokeStyle = "#35d7ee";
+  c.lineWidth = 14;
+  c.lineJoin = "miter";
+  c.miterLimit = 10;
+  c.lineCap = "butt";
+
+  // 1) rect（内部会 closePath）
+  c.beginPath();
+  c.rect(26, 26, 80, 80);
+  c.stroke();
+
+  // 2) moveTo/lineTo×2 + closePath
+  c.beginPath();
+  c.moveTo(186, 26);
+  c.lineTo(146, 106);
+  c.lineTo(226, 106);
+  c.closePath();
+  c.stroke();
+
+  // 3) 首尾重合点（**没有** closePath：末点显式回到起点）
+  c.beginPath();
+  c.moveTo(306, 26);
+  c.lineTo(266, 106);
+  c.lineTo(346, 106);
+  c.lineTo(306, 26);
+  c.stroke();
+
+  // 4) 整圆 arc（首尾点重合）
+  c.beginPath();
+  c.arc(421, 66, 40, 0, Math.PI * 2);
+  c.stroke();
+
+  // 5) closePath + round join
+  c.strokeStyle = "#ff9a3d";
+  c.lineJoin = "round";
+  c.beginPath();
+  c.moveTo(40, 160);
+  c.lineTo(120, 148);
+  c.lineTo(200, 190);
+  c.lineTo(120, 240);
+  c.closePath();
+  c.stroke();
+
+  // 6) 五角星 miter（尖角 + 首尾闭合）
+  c.strokeStyle = "#f5d02e";
+  c.lineJoin = "miter";
+  c.lineWidth = 10;
+  c.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i * 4 * Math.PI) / 5;
+    const x = 359 + Math.cos(a) * 52;
+    const y = 196 + Math.sin(a) * 52;
+    if (i === 0) c.moveTo(x, y);
+    else c.lineTo(x, y);
+  }
+  c.closePath();
+  c.stroke();
 }
 
 /** 图案填充场景：repeat / repeat-x / repeat-y / no-repeat + 图案描边 + 图案文字 */
@@ -598,6 +671,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
+  stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },
 };
 const sceneId = params.get("scene") ?? "parity";
 const scene = SCENES[sceneId] ?? SCENES.parity!;
