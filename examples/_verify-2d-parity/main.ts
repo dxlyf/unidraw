@@ -72,6 +72,8 @@ interface SceneCtx {
   scale(x: number, y: number): void;
   /** 框架侧用 clipRect；原生侧由调用点改成 rect()+clip() */
   clipRect?(x: number, y: number, w: number, h: number): void;
+  /** 用当前路径做裁剪（原生侧走这个） */
+  clip?(): void;
 }
 
 interface GradientFactory {
@@ -342,6 +344,94 @@ function drawShadow1(c: SceneCtx): void {
   c.shadowOffsetY = 40;
   c.fillStyle = "#00a0ff";
   c.fillRect(20, 20, 60, 40);
+}
+
+/** 阴影 + 图层混合模式**同帧**：两者都会改 pass 结构（阴影多趟 submit、混合 ping-pong），
+ *  最容易互相踩 —— WebGL2 上曾经整幅几乎空白（只剩网格和一个形状） */
+const SHADOWBLEND_REGIONS: { name: string; x: number; y: number; w: number; h: number }[] = [
+  { name: "阴影区", x: 8, y: 8, w: 150, h: 120 },
+  { name: "混合区", x: 158, y: 8, w: 156, h: 120 },
+  { name: "混合之后", x: 320, y: 8, w: 152, h: 120 },
+  { name: "底部一排", x: 8, y: 140, w: 464, h: 122 },
+];
+
+function drawShadowBlend(c: SceneCtx): void {
+  // `?sb=` 用于二分定位（noA=去掉第一组阴影 / noB=去掉第二组 / noclip=去掉裁剪）
+  const sb = params.get("sb") ?? "full";
+  const withA = sb !== "noA" && sb !== "onlyB";
+  const withB = sb !== "noB" && sb !== "onlyA";
+  const withClip = sb !== "noclip";
+
+  c.fillStyle = "#101826";
+  c.fillRect(0, 0, W, H);
+
+  // 1) 第一组阴影（文字）：出现在图层混合**之前**
+  if (withA) {
+    c.shadowColor = "rgba(0,0,0,0.65)";
+    c.shadowBlur = 10;
+    c.shadowOffsetX = 4;
+    c.shadowOffsetY = 4;
+    c.fillStyle = "#f2f5ff";
+    c.font = `700 24px ${FONT}`;
+    c.fillText("shadow-A", 24, 60);
+    c.shadowColor = "rgba(0,0,0,0)";
+    c.shadowBlur = 0;
+    c.shadowOffsetX = 0;
+    c.shadowOffsetY = 0;
+  }
+
+  // 2) 图层混合模式（overlay）：目标是上面已经画好的内容
+  c.fillStyle = "#ff9a3d";
+  c.fillRect(170, 30, 60, 70);
+  c.globalCompositeOperation = "overlay";
+  c.fillStyle = "#8f5cff";
+  c.beginPath();
+  c.arc(230, 65, 28, 0, Math.PI * 2);
+  c.fill();
+  c.globalCompositeOperation = "source-over";
+
+  // 3) 第二组阴影（圆角矩形）：参数不同 → 另一组，且出现在混合**之后**（+ 裁剪里）
+  if (withClip) {
+    c.save();
+    if (c.clipRect) c.clipRect(320, 20, 152, 100);
+    else {
+      c.beginPath();
+      c.rect(320, 20, 152, 100);
+      c.clip!();
+    }
+  }
+  if (withB) {
+    c.shadowColor = "rgba(0,0,0,0.7)";
+    c.shadowBlur = 8;
+    c.shadowOffsetX = 6;
+    c.shadowOffsetY = 5;
+  }
+  c.fillStyle = "#f5d02e";
+  c.beginPath();
+  c.roundRect(330, 30, 90, 50, 8);
+  c.fill();
+  c.shadowColor = "rgba(0,0,0,0)";
+  c.shadowBlur = 0;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+  if (withClip) c.restore();
+
+  // 4) 混合之后还要有普通图形 + 文字（验证 ping-pong 之后图层没丢）
+  c.fillStyle = "#3dd68c";
+  c.beginPath();
+  c.roundRect(340, 86, 100, 24, 6);
+  c.fill();
+  c.fillStyle = "#f2f5ff";
+  c.font = `700 18px ${FONT}`;
+  c.fillText("after", 352, 104);
+
+  // 5) 底部一排普通图形
+  for (let i = 0; i < 6; i++) {
+    c.fillStyle = i % 2 ? "#f5d02e" : "#ff5c7a";
+    c.beginPath();
+    c.roundRect(20 + i * 76, 170, 60, 60, 8);
+    c.fill();
+  }
 }
 
 /** 描边场景：闭合路径首尾的 join（原生 vs 本框架） */
@@ -839,6 +929,7 @@ const SCENES: Record<string, { label: string; draw: (c: SceneCtx, g: GradientFac
   extras: { label: "虚线/文字API", draw: (c) => drawTextDash(c), regions: EXTRAS_REGIONS },
   composite: { label: "合成模式", draw: (c) => drawComposite(c), regions: COMPOSITE_REGIONS },
   blend: { label: "图层混合模式", draw: (c) => drawBlendModes(c), regions: BLEND_REGIONS },
+  shadowblend: { label: "阴影+图层混合", draw: (c) => drawShadowBlend(c), regions: SHADOWBLEND_REGIONS },
   image: { label: "drawImage", draw: (c) => drawImages(c), regions: IMAGE_REGIONS },
   pattern: { label: "图案填充", draw: (c) => drawPatterns(c), regions: PATTERN_REGIONS },
   stroke: { label: "闭合描边", draw: (c) => drawStrokes(c), regions: STROKE_REGIONS },
@@ -936,6 +1027,8 @@ async function main(): Promise<void> {
     format: device.canvasFormat() ?? "rgba8unorm",
   });
   const c2d = new Canvas2D(device);
+  // 调试用：把实例暴露出来（无头排查时可以直接读图层纹理内容）
+  (globalThis as Record<string, unknown>).__c2d = c2d;
   const encoder = device.createCommandEncoder("parity");
   const pass = encoder.beginRenderPass({
     label: "parity-2d",

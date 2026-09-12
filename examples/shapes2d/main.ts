@@ -52,6 +52,12 @@ bootDemo(
         color: C.yellow,
         /** 背景网格（1px 参考网格） */
         grid: true,
+        /** 文字/圆角矩形的阴影（shadowBlur 图层） */
+        shadow: true,
+        /** 覆盖矩形用 overlay（需要「目标当纹理」的图层模式） */
+        blend: true,
+        /** 虚线描边 */
+        dash: true,
       };
       applyUrlOverrides(state, params);
 
@@ -71,6 +77,8 @@ bootDemo(
       gui.add(state, "stroke").name("描边（路径）");
       gui.addColor(state, "color").name("星形颜色");
       gui.add(state, "grid").name("显示网格");
+      gui.add(state,'shadow').name('显示阴影')
+      
 
       const hud = document.querySelector<HTMLElement>(".hud");
       if (hud) {
@@ -230,10 +238,12 @@ bootDemo(
             const box = s * 0.3;
             label("文本（字形栅格化 + 纹理）", x0, y0);
             // 文字阴影：shadowBlur 走「遮罩 + 分离高斯 + 合成」的图层路径
-            c2d.shadowColor = "rgba(0, 0, 0, 0.65)";
-            c2d.shadowBlur = s * 0.03;
-            c2d.shadowOffsetX = s * 0.008;
-            c2d.shadowOffsetY = s * 0.008;
+            if (state.shadow) {
+              c2d.shadowColor = "rgba(0, 0, 0, 0.65)";
+              c2d.shadowBlur = s * 0.03;
+              c2d.shadowOffsetX = s * 0.008;
+              c2d.shadowOffsetY = s * 0.008;
+            }
             c2d.fillStyle = C.white;
             c2d.font = `700 ${Math.round(box * 0.16)}px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif`;
             c2d.fillText("Hello UniDraw 你好 2D", x0, y0 + box * 0.18);
@@ -288,18 +298,20 @@ bootDemo(
             c2d.globalAlpha = 1;
             // 层级：后画的半透明矩形用**图层混合模式**盖在上面
             // （overlay 需要把目标读成纹理，框架会自动切到图层模式）
-            c2d.globalCompositeOperation = "overlay";
+            c2d.globalCompositeOperation = state.blend ? "overlay" : "source-over";
             c2d.fillStyle = C.cyan;
-            c2d.globalAlpha = 0.7;
+            c2d.globalAlpha = state.blend ? 0.7 : 0.5;
             c2d.fillRect(x0 + box * 0.34, y0 + box * 0.72, box * 0.3, box * 0.2);
             c2d.globalAlpha = 1;
             c2d.globalCompositeOperation = "source-over";
 
             // 虚线 + 阴影的圆角矩形
-            c2d.shadowColor = "rgba(0, 0, 0, 0.7)";
-            c2d.shadowBlur = s * 0.02;
-            c2d.shadowOffsetX = s * 0.01;
-            c2d.shadowOffsetY = s * 0.008;
+            if (state.shadow) {
+              c2d.shadowColor = "rgba(0, 0, 0, 0.7)";
+              c2d.shadowBlur = s * 0.02;
+              c2d.shadowOffsetX = s * 0.01;
+              c2d.shadowOffsetY = s * 0.008;
+            }
             c2d.fillStyle = C.yellow;
             c2d.beginPath();
             c2d.roundRect(x0 - box * 0.5, y0 + box * 1.02, box * 0.9, box * 0.16, box * 0.04);
@@ -308,7 +320,7 @@ bootDemo(
             c2d.shadowBlur = 0;
             c2d.shadowOffsetX = 0;
             c2d.shadowOffsetY = 0;
-            c2d.setLineDash([s * 0.02, s * 0.012]);
+            if (state.dash) c2d.setLineDash([s * 0.02, s * 0.012]);
             c2d.strokeStyle = C.white;
             c2d.lineWidth = Math.max(1.5, s * 0.004);
             c2d.beginPath();

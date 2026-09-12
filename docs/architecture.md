@@ -302,6 +302,15 @@ textIBuf.write(textIndices);   // ← 把**当前 VAO**（flat 的 VAO）的索�
   所以只有**把几何渲染产物直接呈现到画布**（MSAA 解析结果）时才会暴露：
   WebGPU 必须翻转 V（`CopyPassOptions.flipY`），否则整幅画面上下颠倒。
   回归页：`examples/_verify-2d-parity` + `examples/shapes2d` 的跨后端对照。
+- **同一帧里多张同尺寸 MSAA 目标不能共用 renderbuffer**：WebGL2 的 MSAA 附件是
+  `renderbufferStorageMultisample` 建的，而 render2d 的阴影遮罩、图层模式的
+  ping-pong 图层都是「与画布同尺寸、同采样」的 MSAA 目标。早先按
+  `格式×尺寸×采样数` 缓存 renderbuffer（为了跨帧复用），于是这些目标**共用同一个
+  renderbuffer**：阴影遮罩那趟一清屏就把图层的中间结果抹掉，之后带 `loadOp: "load"`
+  的图层 pass 载入的其实是阴影遮罩 —— 表现是「阴影一渲染完，前面画的内容全没了，
+  整幅几乎空白」，而 WebGPU 完全正常（它每张目标各自持有 MSAA 纹理）。现在
+  renderbuffer 按**纹理身份**缓存，纹理销毁时经 `releaseMsaaResources()` 回收。
+  回归：`examples/_verify-2d-parity?scene=shadowblend`（阴影 + 图层混合同帧）。
 
 ## 7. 纹理上传
 

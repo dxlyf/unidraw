@@ -257,6 +257,7 @@ export class WebGL2Device extends Device {
           }
           passHeight = targetHeight;
 
+
           // 清屏不受 scissor 影响
           if (scissorWas) gl.disable(gl.SCISSOR_TEST);
           gl.depthMask(true);
@@ -294,6 +295,7 @@ export class WebGL2Device extends Device {
           if (msaaSourceFb && msaaResolveTarget) {
             this.resolveMsaa(msaaSourceFb, msaaResolveTarget);
           }
+
           msaaSourceFb = null;
           msaaResolveTarget = null;
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -346,6 +348,7 @@ export class WebGL2Device extends Device {
         case "draw":
         case "drawIndexed": {
           assert(inPass && currentPipeline, "draw 前必须 setPipeline");
+
           this.drawPrimitive(currentPipeline, indexBuffer, op, vertexBuffers);
           break;
         }
@@ -588,10 +591,18 @@ export class WebGL2Device extends Device {
     return fb;
   }
 
-  /** 多重采样 attachment 用的 renderbuffer（按 格式×尺寸×采样数 缓存复用）。 */
+  /**
+   * 多重采样 attachment 用的 renderbuffer。
+   *
+   * **必须按纹理身份缓存，不能按 格式×尺寸×采样数 缓存**：那样「同尺寸同采样的多张
+   * MSAA 目标」会共用同一个 renderbuffer，于是 A 的 pass 一清屏就把 B 的内容抹掉。
+   * 一帧里只有一张 MSAA 目标时看不出问题，但 render2d 的阴影遮罩、图层模式的
+   * ping-pong 图层都是同尺寸 MSAA 目标 —— 表现是「阴影渲染完之后图层内容全没了、
+   * 整幅几乎空白」。纹理销毁时用 `releaseMsaaResources` 回收。
+   */
   private getRenderbuffer(texture: GLTexture): WebGLRenderbuffer {
     const gl = this.gl;
-    const key = `${texture.format}|${texture.width}x${texture.height}|${texture.sampleCount}`;
+    const key = `rb${texture.id}`;
     const cached = this._renderbuffers.get(key);
     if (cached) return cached;
     const rb = gl.createRenderbuffer();
@@ -602,6 +613,24 @@ export class WebGL2Device extends Device {
     gl.bindRenderbuffer(gl.RENDERBUFFER, null);
     this._renderbuffers.set(key, rb);
     return rb;
+  }
+
+  /** 纹理销毁时回收它独占的 renderbuffer 与相关 FBO（见 `getRenderbuffer` 的说明） */
+  releaseMsaaResources(textureId: number): void {
+    const gl = this.gl;
+    const rbKey = `rb${textureId}`;
+    const rb = this._renderbuffers.get(rbKey);
+    if (rb) {
+      gl.deleteRenderbuffer(rb);
+      this._renderbuffers.delete(rbKey);
+    }
+    for (const [key, fb] of this._fbos) {
+      const m = /c(\d+)d(\d+)/.exec(key);
+      if (m && (Number(m[1]) === textureId || Number(m[2]) === textureId)) {
+        gl.deleteFramebuffer(fb);
+        this._fbos.delete(key);
+      }
+    }
   }
 
   /** MSAA framebuffer：颜色/深度都用多重采样 renderbuffer；解析目标在 pass 结束时 blit。 */

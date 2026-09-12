@@ -112,18 +112,28 @@ export async function bootDemo(hooks: DemoHooks, options: DemoOptions = {}): Pro
   style.textContent = `
     html, body { margin:0; height:100%; overflow:hidden; background:#0b0c10; font-family: system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
     #canvas { width:100vw; height:100vh; display:block; touch-action:none; }
-    .hud { position:fixed; left:14px; top:12px; color:#d7d9e0; font-size:13px; line-height:1.7; z-index:10;
-           text-shadow:0 1px 3px rgba(0,0,0,.8); pointer-events:none; user-select:none; }
+    .hud { position:fixed; left:14px; top:12px; color:#d7d9e0; font-size:13px; line-height:1.6; z-index:10;
+           max-width:calc(100vw - 28px); text-shadow:0 1px 3px rgba(0,0,0,.8); pointer-events:none; user-select:none; }
     .hud b { color:#fff; }
-    .hud .backend { display:inline-block; padding:1px 8px; border-radius:10px; background:#1d2130; border:1px solid #343a4e; margin-left:6px; font-size:11px; }
+    /* 后端徽标必须**单行**：设备名很长（"ANGLE (Intel, Intel(R) UHD Graphics ...)"），
+       一旦换行，它那块不透明底就会变成一大片色块盖住画面 —— 看起来像「图形没画出来」。
+       超长就省略，完整名字放 title。 */
+    .hud .backend { display:inline-block; vertical-align:bottom; padding:1px 8px; border-radius:10px;
+                    background:#1d2130; border:1px solid #343a4e; margin-left:6px; font-size:11px;
+                    max-width:52ch; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .hud .err { color:#ff8f9e; white-space:pre-wrap; max-width:70vw; }
-    .hint { position:fixed; right:12px; bottom:10px; color:#6b7185; font-size:11px; pointer-events:none; z-index:10; }
+    /* 没有错误时不占位：HUD 每多一行就多盖住画面一条 */
+    .hud .err:empty { display:none; }
+    .hint { position:fixed; right:12px; bottom:10px; color:#6b7185; font-size:11px; pointer-events:none; z-index:10;
+            max-width:calc(100vw - 24px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   `;
   document.head.appendChild(style);
 
   const hud = document.createElement("div");
   hud.className = "hud";
-  hud.innerHTML = `<b>${hooks.title}</b><span class="backend" id="backend"></span><br/><span id="fps"></span><div class="err" id="err"></div>`;
+  // 标题一行、后端徽标 + fps 一行、错误（有才显示）一行 —— HUD 是**盖在画面上的**，
+  // 行数越少挡住的图形越少（见下面 .hud .backend 的说明）。
+  hud.innerHTML = `<b>${hooks.title}</b><br/><span class="backend" id="backend"></span> <span id="fps"></span><div class="err" id="err"></div>`;
   document.body.appendChild(hud);
   const hint = document.createElement("div");
   hint.className = "hint";
@@ -152,10 +162,13 @@ export async function bootDemo(hooks: DemoHooks, options: DemoOptions = {}): Pro
     backend: backendFromUrl() as "auto" | "webgpu" | "webgl2" | "mock",
     depth: depthFromUrl() && depthRequested,
   });
-  backendEl.textContent = renderer.device.kind;
-  backendEl.textContent += " · " + renderer.device.info.name;
+  // 设备名可能很长（"ANGLE (Intel, Intel(R) UHD Graphics (0x000046A6) Direct3D11 vs_5_0 ps_5_0, D3D11)"），
+  // 截断显示 + title 里给全名：见上面 `.hud .backend` 的说明（换行会变成盖住画面的大色块）。
+  const deviceName = renderer.device.info.name;
+  backendEl.textContent = `${renderer.device.kind} · ${deviceName.length > 40 ? deviceName.slice(0, 39) + "…" : deviceName}`;
+  backendEl.setAttribute("title", deviceName);
   if (renderer.device.kind === "webgpu") {
-    hint.textContent = "WebGPU 后端：渲染为空时请查看控制台（已打印 WGSL 编译诊断/校验错误）· 拖拽旋转 · ?backend=webgl2 可对比";
+    hint.textContent = "WebGPU：画面为空时请看控制台的 WGSL 诊断 · 拖拽旋转 · ?backend=webgl2 对比";
   }
 
   // 自动化探针钩子（无副作用）

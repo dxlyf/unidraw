@@ -15,10 +15,12 @@ export class GLTexture extends Texture {
   readonly id: number = nextId();
   /** 采样数（>1 时用多重采样 renderbuffer 作为附件，本对象只是标识/句柄） */
   readonly sampleCount: number;
+  private readonly _device: WebGL2Device;
 
   constructor(device: WebGL2Device, desc: TextureDescriptor) {
     super(desc);
     assert(desc.width >= 1 && desc.height >= 1, "纹理尺寸必须 >=1");
+    this._device = device;
     this.gl = device.gl;
     this.sampleCount = Math.max(1, Math.floor(desc.sampleCount ?? 1));
     const tex = this.gl.createTexture();
@@ -92,5 +94,7 @@ export class GLTexture extends Texture {
 
   protected destroyNative(): void {
     this.gl.deleteTexture(this.glTexture);
+    // MSAA attachment 用的 renderbuffer / FBO 是按纹理身份缓存的，纹理没了要一起回收
+    this._device.releaseMsaaResources(this.id);
   }
 }
