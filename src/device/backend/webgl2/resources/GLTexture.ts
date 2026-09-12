@@ -15,6 +15,8 @@ export class GLTexture extends Texture {
   readonly id: number = nextId();
   /** 采样数（>1 时用多重采样 renderbuffer 作为附件，本对象只是标识/句柄） */
   readonly sampleCount: number;
+  /** GL 纹理目标（由 dimension 决定：2D / 3D / 2D_ARRAY / CUBE_MAP） */
+  private readonly _target: number;
   private readonly _device: WebGL2Device;
 
   constructor(device: WebGL2Device, desc: TextureDescriptor) {
@@ -23,6 +25,14 @@ export class GLTexture extends Texture {
     this._device = device;
     this.gl = device.gl;
     this.sampleCount = Math.max(1, Math.floor(desc.sampleCount ?? 1));
+    this._target =
+      this.dimension === "3d"
+        ? (device.gl.TEXTURE_3D as number)
+        : this.dimension === "2d-array"
+          ? (device.gl.TEXTURE_2D_ARRAY as number)
+          : this.dimension === "cube"
+            ? (device.gl.TEXTURE_CUBE_MAP as number)
+            : (device.gl.TEXTURE_2D as number);
     const tex = this.gl.createTexture();
     assert(tex, "createTexture 失败");
     this.glTexture = tex;
@@ -32,21 +42,29 @@ export class GLTexture extends Texture {
       return;
     }
     this.bindScratch();
-    const params = textureGLParams(this.gl, desc.format);
-    const depth = GLTexture.isDepthFormatLocal(desc.format);
-    if (depth) {
-      this.gl.texStorage2D(this.gl.TEXTURE_2D, 1, params.internal, desc.width, desc.height);
+    const gl = this.gl;
+    const params = textureGLParams(gl, desc.format);
+    const layers = this.depthOrArrayLayers;
+    const immutable = GLTexture.isDepthFormatLocal(desc.format) || this.dimension === "cube";
+    // cube 必须用不可变存储（texStorage2D 会一次分配 6 个面；逐面 texImage2D 要给
+    // TEXTURE_CUBE_MAP_POSITIVE_X+i，用整个 CUBE_MAP 目标是非法枚举）
+    if (immutable) {
+      if (this.dimension === "2d") gl.texStorage2D(gl.TEXTURE_2D, 1, params.internal, desc.width, desc.height);
+      else if (this.dimension === "cube") gl.texStorage2D(gl.TEXTURE_CUBE_MAP, 1, params.internal, desc.width, desc.height);
+      else gl.texStorage3D(this._target, 1, params.internal, desc.width, desc.height, layers);
     } else {
-      this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
-      this.gl.texImage2D(this.gl.TEXTURE_2D, 0, params.internal, desc.width, desc.height, 0, params.format, params.type, null);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      if (this.dimension === "2d") gl.texImage2D(gl.TEXTURE_2D, 0, params.internal, desc.width, desc.height, 0, params.format, params.type, null);
+      else gl.texImage3D(this._target, 0, params.internal, desc.width, desc.height, layers, 0, params.format, params.type, null);
     }
     // 深度纹理也要显式设成 NEAREST/CLAMP：默认的 NEAREST_MIPMAP_LINEAR 在
     // 「无 mip 链 + 未绑定 sampler 对象」时属于**不完整纹理**（采样恒为 (0,0,0,1)），
     // 阴影贴图这类「纹理自带采样参数」的用法会直接读到全 1 → 阴影完全失效。
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.NEAREST);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.NEAREST);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+    gl.texParameteri(this._target, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(this._target, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(this._target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(this._target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    if (this.dimension === "3d" || this.dimension === "2d-array") gl.texParameteri(this._target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
     device.register(this);
   }
 
@@ -57,7 +75,7 @@ export class GLTexture extends Texture {
   /** 内部绑定用纹理单元 0（layout 分配从 1 开始，永不冲突）。 */
   private bindScratch(): void {
     this.gl.activeTexture(this.gl.TEXTURE0);
-    this.gl.bindTexture(this.gl.TEXTURE_2D, this.glTexture);
+    this.gl.bindTexture(this._target, this.glTexture);
   }
 
   protected override createDefaultView(): TextureView {
@@ -79,12 +97,27 @@ export class GLTexture extends Texture {
     assert(bytesPerRow % bpp === 0, "bytesPerRow 必须是纹素大小整数倍");
     const rowLength = bytesPerRow / bpp;
 
+    const gl = this.gl;
+    const mip = options.mipLevel ?? 0;
+    const z = Math.max(0, Math.floor(options.z ?? 0));
+    const depth = Math.max(1, Math.floor(options.depth ?? 1));
     this.bindScratch();
-    this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
-    this.gl.pixelStorei(this.gl.UNPACK_ROW_LENGTH, rowLength);
-    this.gl.pixelStorei(this.gl.UNPACK_SKIP_PIXELS, 0);
-    this.gl.texSubImage2D(this.gl.TEXTURE_2D, options.mipLevel ?? 0, x, y, width, height, params.format, params.type, data);
-    this.gl.pixelStorei(this.gl.UNPACK_ROW_LENGTH, 0);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, rowLength);
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_IMAGES, 0);
+    if (this.dimension === "3d" || this.dimension === "2d-array") {
+      // 每层步长：给了 bytesPerImage 就按它（层间可能有 padding），否则紧密排列
+      const imageRows = options.bytesPerImage !== undefined ? Math.round(options.bytesPerImage / bytesPerRow) : height;
+      gl.pixelStorei(gl.UNPACK_IMAGE_HEIGHT, imageRows);
+      gl.texSubImage3D(this._target, mip, x, y, z, width, height, depth, params.format, params.type, data);
+      gl.pixelStorei(gl.UNPACK_IMAGE_HEIGHT, 0);
+    } else if (this.dimension === "cube") {
+      gl.texSubImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + z, mip, x, y, width, height, params.format, params.type, data);
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, mip, x, y, width, height, params.format, params.type, data);
+    }
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
   }
 
   override generateMipmaps(): void {

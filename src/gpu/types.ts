@@ -115,7 +115,14 @@ export type TextureFormat =
   | "depth32float"
   | "depth24plus";
 
-export type TextureDimension = "2d";
+/**
+ * 纹理维度。
+ *
+ * `"2d"` 之外的三态两个后端都支持（WebGL2 走 `texStorage3D` / `TEXTURE_2D_ARRAY` /
+ * `TEXTURE_CUBE_MAP`，cube 的 6 个面各占一个层）；采样时着色器要按维度声明
+ * （`sampler3D` / `sampler2DArray` / `samplerCube`）。
+ */
+export type TextureDimension = "2d" | "3d" | "2d-array" | "cube";
 
 export type AddressMode = "clamp-to-edge" | "repeat" | "mirror-repeat";
 export type FilterMode = "nearest" | "linear";

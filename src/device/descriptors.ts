@@ -10,6 +10,7 @@ import type {
   StoreOp,
   TextureFormat,
   TextureUsageFlags,
+  TextureDimension,
   VertexFormat,
   VertexStepMode,
 } from "../gpu/types.js";
@@ -42,6 +43,22 @@ export interface TextureDescriptor {
   usage: TextureUsageFlags;
   mipLevelCount?: number;
   /**
+   * 维度（默认 `"2d"`）。
+   *
+   * - `"2d"`：普通二维纹理；
+   * - `"3d"`：体纹理（`depthOrArrayLayers` = 深度）；
+   * - `"2d-array"`：二维数组（`depthOrArrayLayers` = 层数）；
+   * - `"cube"`：立方体贴图（`depthOrArrayLayers` 固定 6，每个面一个层）。
+   *
+   * 两个后端都支持；采样时着色器要按维度声明（`sampler3D` / `sampler2DArray` /
+   * `samplerCube`），框架只负责创建、上传与绑定。
+   */
+  dimension?: TextureDimension;
+  /**
+   * 3D 深度 / 数组层数 / cube 的面数（cube 必须省略或写 6；默认 1）。
+   */
+  depthOrArrayLayers?: number;
+  /**
    * 采样数（MSAA）：1 = 普通纹理（默认）。
    *
    * - 多采样纹理只能作为渲染附件，不能采样；渲染结果需要 `resolveTo` 到一张普通纹理
@@ -52,15 +69,22 @@ export interface TextureDescriptor {
   sampleCount?: number;
 }
 
+
 export interface TextureUploadOptions {
   x?: number;
   y?: number;
+  /** 3D 纹理的 z / 数组或 cube 的层号（默认 0） */
+  z?: number;
   /** 默认 texture 宽度 */
   width?: number;
   /** 默认 texture 高度 */
   height?: number;
+  /** 3D 纹理一次上传的深度（默认 1） */
+  depth?: number;
   /** 源数据每行字节数；缺省按 width*bytesPerTexel */
   bytesPerRow?: number;
+  /** 源数据每层字节数（3D/数组）；缺省按 bytesPerRow*height */
+  bytesPerImage?: number;
   mipLevel?: number;
 }
 

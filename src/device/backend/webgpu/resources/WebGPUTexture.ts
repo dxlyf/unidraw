@@ -24,7 +24,9 @@ export class WebGPUTexture extends Texture {
     }
     this.gpuTexture = device.gpu.createTexture({
       label: desc.label,
-      size: { width: desc.width, height: desc.height },
+      // cube / 2d-array 在 WebGPU 里都是「2d + N 层」（cube 恒 6 层）；3d 才是真 3d
+      size: { width: desc.width, height: desc.height, depthOrArrayLayers: this.depthOrArrayLayers },
+      dimension: this.dimension === "3d" ? "3d" : "2d",
       format: desc.format as GPUTextureFormat,
       usage: mapUsage(desc.usage),
       mipLevelCount: desc.mipLevelCount ?? 1,
@@ -50,20 +52,29 @@ export class WebGPUTexture extends Texture {
 
     // WebGPU 要求 bytesPerRow 为 256 的倍数 → 必要时做行填充拷贝
     const aligned = Math.ceil(bytesPerRow / 256) * 256;
+    // 注意**多层**（3D / 2D 数组 / cube）：payload 要按层铺开，每层行数用 bytesPerImage
+    // （缺省 bytesPerRow×height）算 —— 只按 height 分配会短一大截，WebGPU 直接报
+    // “Required size for texture data layout (...) exceeds the linear data size”。
+    const z = Math.max(0, Math.floor(options.z ?? 0));
+    const depthLayers = Math.max(1, Math.floor(options.depth ?? 1));
+    const rowsPerImage = Math.max(1, Math.round((options.bytesPerImage ?? bytesPerRow * height) / bytesPerRow));
     let payload: ArrayBufferView = data;
-    if (aligned !== bytesPerRow || data.byteOffset % 4 !== 0) {
-      const copy = new Uint8Array(aligned * height);
+    if (aligned !== bytesPerRow || data.byteOffset % 4 !== 0 || depthLayers > 1) {
+      const copy = new Uint8Array(aligned * rowsPerImage * depthLayers);
       const src = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      for (let row = 0; row < height; row++) {
-        copy.set(src.subarray(row * bytesPerRow, row * bytesPerRow + width * bpp), row * aligned);
+      for (let layer = 0; layer < depthLayers; layer++) {
+        for (let row = 0; row < height; row++) {
+          const from = layer * rowsPerImage * bytesPerRow + row * bytesPerRow;
+          copy.set(src.subarray(from, from + width * bpp), (layer * rowsPerImage + row) * aligned);
+        }
       }
       payload = copy;
     }
     this._device.gpu.queue.writeTexture(
-      { texture: this.gpuTexture, mipLevel: options.mipLevel ?? 0, origin: { x, y } },
+      { texture: this.gpuTexture, mipLevel: options.mipLevel ?? 0, origin: { x, y, z } },
       payload,
-      { bytesPerRow: aligned, rowsPerImage: height },
-      { width, height },
+      { bytesPerRow: aligned, rowsPerImage },
+      { width, height, depthOrArrayLayers: depthLayers },
     );
   }
 

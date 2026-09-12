@@ -1,5 +1,6 @@
 import type { TextureFormat, TextureUsageFlags } from "../../gpu/types.js";
 import type { TextureDescriptor, TextureUploadOptions } from "../descriptors.js";
+import type { TextureDimension } from "../../gpu/types.js";
 import { ResourceBase } from "./ResourceBase.js";
 import type { TextureView } from "./TextureView.js";
 
@@ -11,6 +12,10 @@ export abstract class Texture extends ResourceBase {
   readonly height: number;
   readonly format: TextureFormat;
   readonly usage: TextureUsageFlags;
+  /** 维度（默认 `"2d"`）；见 `TextureDescriptor.dimension` */
+  readonly dimension: TextureDimension;
+  /** 3D 深度 / 数组层数 / cube 的面数（cube 恒为 6） */
+  readonly depthOrArrayLayers: number;
   private _view: TextureView | null = null;
 
   constructor(desc: TextureDescriptor) {
@@ -19,6 +24,8 @@ export abstract class Texture extends ResourceBase {
     this.height = desc.height;
     this.format = desc.format;
     this.usage = desc.usage;
+    this.dimension = desc.dimension ?? "2d";
+    this.depthOrArrayLayers = this.dimension === "cube" ? 6 : Math.max(1, Math.floor(desc.depthOrArrayLayers ?? 1));
   }
 
   /** 获取默认视图（mip 0 / layer 0）。 */
